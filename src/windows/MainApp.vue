@@ -367,8 +367,9 @@ async function doVerifyControlled(mode: "full" | "quick") {
     controlledVerify.value = null; verifyReport.value = null;
     const sel = Array.from(selected.value);
     // At 盘符 list with backup root checked: paths include drive root → backend expands to all controlled.
+    // Nothing checked → paths null → verify all controlled files on this backup drive.
     const onlyBackupRoot = !currentPath.value && sel.length > 0 && sel.every((p) => isDriveRootPath(p));
-    const pathsArg = onlyBackupRoot ? sel : (sel.length ? sel : null);
+    const pathsArg = onlyBackupRoot ? sel : (sel.length > 0 ? sel : null);
     statusMsg.value = mode === "full"
       ? (pathsArg && !onlyBackupRoot ? "按勾选完整校验进行中…" : "全部受控完整校验进行中…")
       : (pathsArg && !onlyBackupRoot ? "按勾选快速校验进行中…" : "全部受控快速校验进行中…");
@@ -384,18 +385,14 @@ async function doVerifyControlled(mode: "full" | "quick") {
 }
 
 async function openAdvancedVerify() {
-  errorMsg.value = ""; statusMsg.value = "";
-  try {
-    await openAdvancedVerifyWindow();
-    statusMsg.value = "已打开高级校验窗口";
-  } catch (e) { errorMsg.value = String(e); }
+  errorMsg.value = "";
+  try { await openAdvancedVerifyWindow(); }
+  catch (e) { errorMsg.value = String(e); }
 }
 async function openAdvancedBackup() {
-  errorMsg.value = ""; statusMsg.value = "";
-  try {
-    await openAdvancedBackupWindow();
-    statusMsg.value = "已打开高级备份窗口";
-  } catch (e) { errorMsg.value = String(e); }
+  errorMsg.value = "";
+  try { await openAdvancedBackupWindow(); }
+  catch (e) { errorMsg.value = String(e); }
 }
 async function doVerifyBatch(mode: "full" | "quick") {
   errorMsg.value = ""; statusMsg.value = "";
@@ -560,7 +557,7 @@ onUnmounted(() => { for (const u of unlisteners) u(); unlisteners = []; });
             <h2>校验</h2>
             <button type="button" class="btn small primary-outline panel-head-action" title="打开高级校验窗口：批次号/时间/文件数/盘符，可多选校验" @click="openAdvancedVerify">高级校验</button>
           </div>
-          <p class="muted small">直接使用当前勾选的目录/文件（仅其中已受控项）；未勾选则校验全部受控。在盘符列表勾选备份盘符亦可（等同该盘全部受控）。非备份盘符不启用。可与备份/索引并行。</p>
+          <p class="muted small">直接使用当前勾选的目录/文件（仅其中已受控项）；未勾选则校验全部受控。在盘符列表勾选备份盘符亦可（等同该盘全部受控）。非备份盘符不启用。</p>
           <div class="row">
             <button class="btn primary" title="按当前勾选（或全部）快速校验；盘符列表勾选备份盘=该盘全部受控" :disabled="!canVerifyControlled" @click="doVerifyControlled('quick')">快速校验</button>
             <button class="btn" title="按当前勾选（或全部）完整校验；盘符列表勾选备份盘=该盘全部受控" :disabled="!canVerifyControlled" @click="doVerifyControlled('full')">完整校验</button>
