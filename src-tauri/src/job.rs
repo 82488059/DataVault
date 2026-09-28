@@ -40,6 +40,7 @@ pub struct JobFinished {
     pub ok: bool,
     pub cancelled: bool,
     pub added: usize,
+    pub skipped: usize,
     pub failed: usize,
     pub total: usize,
     pub message: String,
@@ -98,7 +99,25 @@ fn run_hash_job(
     job_id: &str,
     kind: &str,
 ) {
-    let total = files.len();
+    // Skip files already in vault.db — do not re-hash.
+    let existing: std::collections::HashSet<String> = vault::list_controlled_files(drive_root)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|f| f.rel_path.to_lowercase())
+        .collect();
+
+    let mut to_hash: Vec<PathBuf> = Vec::new();
+    let mut skipped = 0usize;
+    for abs in files {
+        match vault::normalize_rel_path(drive_root, &abs) {
+            Ok(rel) if existing.contains(&rel.to_lowercase()) => {
+                skipped += 1;
+            }
+            _ => to_hash.push(abs),
+        }
+    }
+
+    let total = to_hash.len();
     let mut added = 0usize;
     let mut failed = 0usize;
     let mut out_files: Vec<ControlledFile> = Vec::new();
@@ -112,11 +131,13 @@ fn run_hash_job(
             current: 0,
             total,
             rel_path: None,
-            message: format!("开始计算哈希，共 {total} 个文件"),
+            message: format!(
+                "开始计算哈希：待处理 {total} 个，跳过已受控 {skipped} 个"
+            ),
         },
     );
 
-    for (i, abs) in files.iter().enumerate() {
+    for (i, abs) in to_hash.iter().enumerate() {
         if CANCEL.load(Ordering::SeqCst) {
             cancelled = true;
             break;
@@ -163,11 +184,11 @@ fn run_hash_job(
     }
 
     let message = if cancelled {
-        format!("已取消：成功 {added}，失败 {failed}，共 {total}")
+        format!("已取消：新增 {added}，跳过已受控 {skipped}，失败 {failed}")
     } else if failed == 0 {
-        format!("完成：已登记 {added} 个受控文件")
+        format!("完成：新增 {added} 个受控文件，跳过已受控 {skipped} 个")
     } else {
-        format!("完成：成功 {added}，失败 {failed}，共 {total}")
+        format!("完成：新增 {added}，跳过已受控 {skipped}，失败 {failed}，待处理 {total}")
     };
 
     emit_finished(
@@ -178,6 +199,7 @@ fn run_hash_job(
             ok: !cancelled && failed == 0,
             cancelled,
             added,
+            skipped,
             failed,
             total,
             message,
@@ -232,6 +254,7 @@ pub fn start_add_controlled(
                             ok: false,
                             cancelled: false,
                             added: 0,
+                            skipped: 0,
                             failed: 0,
                             total: 0,
                             message: e,
@@ -293,6 +316,7 @@ pub fn start_index_disk(app: AppHandle, drive: &str) -> Result<JobStart, String>
                         ok: false,
                         cancelled: true,
                         added: 0,
+                            skipped: 0,
                         failed: 0,
                         total: 0,
                         message: "已取消".into(),
@@ -312,6 +336,7 @@ pub fn start_index_disk(app: AppHandle, drive: &str) -> Result<JobStart, String>
                         ok: false,
                         cancelled: false,
                         added: 0,
+                            skipped: 0,
                         failed: 0,
                         total: 0,
                         message: e,

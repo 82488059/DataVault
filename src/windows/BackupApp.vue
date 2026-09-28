@@ -15,6 +15,7 @@ interface DirEntryInfo {
   is_dir: boolean;
   size: number;
   is_backup_disk: boolean;
+  is_controlled: boolean;
 }
 interface FileMeta {
   rel_path: string;
@@ -39,7 +40,7 @@ interface JobProgress {
 }
 interface JobFinished {
   job_id: string; kind: string; ok: boolean; cancelled: boolean;
-  added: number; failed: number; total: number; message: string;
+  added: number; skipped: number; failed: number; total: number; message: string;
 }
 interface BackupJobFinished {
   job_id: string; ok: boolean; cancelled: boolean;
@@ -114,9 +115,26 @@ function useSelectedAsSources() {
   statusMsg.value = `已设置 ${sources.value.length} 个备份源`;
 }
 function useCurrentAsDest() {
-  if (!browsePath.value) { errorMsg.value = "请先进入目标目录"; return; }
+  errorMsg.value = "";
+  // Prefer a single checked directory; otherwise use the folder currently browsed.
+  // Resolve via entries first (accurate is_dir)
+  const fromEntries = entries.value.filter((e) => selected.value.has(e.path) && e.is_dir);
+  if (fromEntries.length === 1) {
+    destPath.value = fromEntries[0].path;
+    statusMsg.value = `目标目录（勾选）：${destPath.value}`;
+    return;
+  }
+  if (fromEntries.length > 1) {
+    errorMsg.value = "请只勾选一个目录作为目标，或进入该目录后点击「设为目标目录」";
+    return;
+  }
+  // If user checked a mix / files only, still allow current browse path
+  if (!browsePath.value) {
+    errorMsg.value = "请勾选一个目录，或先进入目标目录后再点「设为目标目录」";
+    return;
+  }
   destPath.value = browsePath.value;
-  statusMsg.value = `目标目录：${destPath.value}`;
+  statusMsg.value = `目标目录（当前浏览）：${destPath.value}`;
 }
 function removeSource(p: string) { sources.value = sources.value.filter((x) => x !== p); }
 
@@ -231,18 +249,19 @@ onUnmounted(() => { for (const u of unlisteners) u(); unlisteners = []; });
           <button class="btn small" title="返回上一级" :disabled="busy || !browsePath" @click="goUp">上级</button>
           <button class="btn small" title="刷新目录" :disabled="busy" @click="loadDir(browsePath)">刷新</button>
           <button class="btn small primary-outline" title="将当前勾选设为备份源" @click="useSelectedAsSources">设为备份源</button>
-          <button class="btn small primary-outline" title="将当前目录设为备份目标" @click="useCurrentAsDest">设为目标目录</button>
+          <button class="btn small primary-outline" title="将勾选的目录（或当前浏览目录）设为备份目标" @click="useCurrentAsDest">设为目标目录</button>
         </div>
         <div class="table-wrap">
           <table>
-            <thead><tr><th style="width:36px"></th><th>名称</th><th style="width:70px">类型</th></tr></thead>
+            <thead><tr><th style="width:36px"></th><th>名称</th><th style="width:70px">类型</th><th style="width:70px">受控</th></tr></thead>
             <tbody>
               <tr v-for="e in entries" :key="e.path" :class="{ selected: selected.has(e.path) }" @dblclick="openEntry(e)">
                 <td><input type="checkbox" :checked="selected.has(e.path)" @change="toggleSelect(e.path)" /></td>
                 <td class="name" @click="e.is_dir ? openEntry(e) : toggleSelect(e.path)">{{ e.is_dir ? "📁" : "📄" }} {{ e.name }}</td>
                 <td>{{ e.is_dir ? "文件夹" : "文件" }}</td>
+                <td><span v-if="e.is_controlled" class="badge controlled" :title="e.is_dir ? '目录下存在已受控文件' : '已在 vault.db 登记'">受控</span></td>
               </tr>
-              <tr v-if="!entries.length"><td colspan="3" class="muted center">空</td></tr>
+              <tr v-if="!entries.length"><td colspan="4" class="muted center">空</td></tr>
             </tbody>
           </table>
         </div>
@@ -264,8 +283,9 @@ onUnmounted(() => { for (const u of unlisteners) u(); unlisteners = []; });
         </section>
         <section class="panel">
           <h2>受控 / 索引</h2>
+          <p class="muted small">已在 vault.db 中的文件会跳过，不重复计算哈希。</p>
           <button class="btn primary-outline" title="将勾选或备份源路径登记为受控文件并计算 MD5 / FastMD5" :disabled="jobRunning || !currentIsBackup" @click="doAddControlled">添加受控文件</button>
-          <button class="btn primary-outline" title="扫描当前备份盘全部文件，计算 MD5/FastMD5 写入 vault.db" :disabled="jobRunning || !currentIsBackup" @click="doIndex">建立备份索引</button>
+          <button class="btn primary-outline" title="扫描当前备份盘；仅对尚未受控的文件计算 MD5/FastMD5 写入 vault.db" :disabled="jobRunning || !currentIsBackup" @click="doIndex">建立备份索引</button>
           <button v-if="jobRunning" class="btn" title="取消正在进行的后台任务" @click="doCancel">取消任务</button>
         </section>
       </aside>
@@ -309,4 +329,5 @@ input[type=text] { background:#0f1419; border:1px solid #2a3442; color:#e7ecf3; 
 .muted { color:#9aa7b8; } .small { font-size:0.78rem; } .center { text-align:center; }
 .badge { font-size:0.72rem; background:#1f6b45; padding:2px 8px; border-radius:999px; margin-left:6px; }
 .badge.backup { background:#1f6b45; }
+.badge.controlled { background:#5b3db8; margin-left:0; font-size:0.72rem; }
 </style>

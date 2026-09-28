@@ -199,29 +199,27 @@ pub fn add_controlled_files(
     drive_root: &Path,
     paths: &[String],
 ) -> Result<Vec<ControlledFile>, String> {
+    let existing: std::collections::HashSet<String> = list_controlled_files(drive_root)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|f| f.rel_path.to_lowercase())
+        .collect();
     let mut out = Vec::new();
-    for p in paths {
-        let abs = PathBuf::from(p);
-        if abs.is_dir() {
-            // Expand directory: all files under it (not .datavault)
-            let mut files = Vec::new();
-            collect_files_under(&abs, &mut files)?;
-            for f in files {
-                out.push(upsert_controlled_file(
-                    drive_root,
-                    &f,
-                    DEFAULT_SAMPLE_RATIO,
-                    DEFAULT_SAMPLE_CHUNK_MB,
-                )?);
-            }
-        } else {
-            out.push(upsert_controlled_file(
-                drive_root,
-                &abs,
-                DEFAULT_SAMPLE_RATIO,
-                DEFAULT_SAMPLE_CHUNK_MB,
-            )?);
+    let files = expand_paths_to_files(drive_root, paths)?;
+    for f in files {
+        let rel = match normalize_rel_path(drive_root, &f) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        if existing.contains(&rel.to_lowercase()) {
+            continue; // already controlled — skip re-hash
         }
+        out.push(upsert_controlled_file(
+            drive_root,
+            &f,
+            DEFAULT_SAMPLE_RATIO,
+            DEFAULT_SAMPLE_CHUNK_MB,
+        )?);
     }
     Ok(out)
 }
@@ -448,3 +446,78 @@ pub fn verify_controlled(
         errors,
     })
 }
+
+/// Resolve user-selected absolute paths (files and/or directories) to controlled
+/// files already recorded in vault.db. Uncontrolled paths are skipped silently
+/// (they never appear in the returned list or verify results).
+pub fn resolve_controlled_selection(
+    drive_root: &Path,
+    paths: &[String],
+) -> Result<Vec<ControlledFile>, String> {
+    if !disk::is_backup_disk(drive_root) {
+        return Err("当前盘不是 DataVault 备份盘".into());
+    }
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    let all = list_controlled_files(drive_root)?;
+    if all.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let root_s = drive_root
+        .to_string_lossy()
+        .trim_end_matches(['\\', '/'])
+        .replace('/', "\\");
+
+    let mut exact: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut prefixes: Vec<String> = Vec::new();
+    let mut select_all = false;
+
+    for p in paths {
+        let abs = PathBuf::from(p);
+        let abs_s = abs
+            .to_string_lossy()
+            .trim_end_matches(['\\', '/'])
+            .replace('/', "\\");
+        if abs_s.eq_ignore_ascii_case(&root_s) {
+            select_all = true;
+            break;
+        }
+        if abs.is_dir() {
+            match normalize_rel_path(drive_root, &abs) {
+                Ok(rel) => {
+                    let base = rel.trim_end_matches(['\\', '/']).to_string();
+                    prefixes.push(format!("{base}\\"));
+                    exact.insert(base);
+                }
+                Err(_) => {}
+            }
+        } else if abs.is_file() {
+            if let Ok(rel) = normalize_rel_path(drive_root, &abs) {
+                exact.insert(rel);
+            }
+        } else if let Ok(rel) = normalize_rel_path(drive_root, &abs) {
+            let base = rel.trim_end_matches(['\\', '/']).to_string();
+            exact.insert(base.clone());
+            prefixes.push(format!("{base}\\"));
+        }
+    }
+
+    if select_all {
+        return Ok(all);
+    }
+
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for f in all {
+        let rel_l = f.rel_path.to_lowercase();
+        let hit = exact.iter().any(|e| e.eq_ignore_ascii_case(&f.rel_path))
+            || prefixes.iter().any(|pre| rel_l.starts_with(&pre.to_lowercase()));
+        if hit && seen.insert(rel_l) {
+            out.push(f);
+        }
+    }
+    Ok(out)
+}
+

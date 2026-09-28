@@ -69,6 +69,21 @@ pub fn is_backup_disk(drive_root: &Path) -> bool {
     }
 }
 
+
+/// Extract `X:\` from a path like `X:\foo\bar` (Windows drive letter).
+pub fn drive_root_of(path: &Path) -> Option<PathBuf> {
+    let s = path.to_string_lossy();
+    let mut chars = s.chars();
+    let letter = chars.next()?;
+    if !letter.is_ascii_alphabetic() {
+        return None;
+    }
+    if chars.next() != Some(':') {
+        return None;
+    }
+    Some(PathBuf::from(format!(r"{}:\", letter.to_ascii_uppercase())))
+}
+
 /// Create/refresh `.datavault/disk.json` and ensure `vault.db` exists.
 pub fn mark_backup_disk(drive_root: &Path) -> Result<DiskJson, String> {
     let meta = meta_dir(drive_root);

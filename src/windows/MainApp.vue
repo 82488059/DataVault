@@ -9,6 +9,7 @@ interface DirEntryInfo {
   is_dir: boolean;
   size: number;
   is_backup_disk: boolean;
+  is_controlled: boolean;
 }
 
 const currentPath = ref("");
@@ -85,14 +86,32 @@ function toggleSelect(path: string) {
 function selectAllFiles() { selected.value = new Set(entries.value.map((e) => e.path)); }
 async function openEntry(e: DirEntryInfo) { if (e.is_dir) await loadDir(e.path); }
 
+function isDriveRootPath(p: string): boolean {
+  // Accept "E:", "E:\", "E:/" only — not subdirectories.
+  return /^[A-Za-z]:[\\/]?$/.test((p || "").trim());
+}
+
 async function doMarkBackupDisk() {
   errorMsg.value = ""; statusMsg.value = "";
-  let target = currentDrive.value;
+  let target = "";
   if (!currentPath.value) {
-    if (selected.value.size !== 1) { errorMsg.value = "请在盘符列表中勾选一个盘，或先进入该盘"; return; }
+    // Drive letter list: must check exactly one drive
+    if (selected.value.size !== 1) {
+      errorMsg.value = "请在盘符列表中勾选一个盘符根（不可对子目录标记）";
+      return;
+    }
     target = Array.from(selected.value)[0];
+    if (!isDriveRootPath(target)) {
+      errorMsg.value = "只能标记盘符根目录为备份盘，不能标记子目录";
+      return;
+    }
+  } else if (isDriveRootPath(currentPath.value)) {
+    target = currentPath.value;
+  } else {
+    errorMsg.value = "只能在盘符根目录标记备份盘（请返回盘符列表或进入 X:\ 后再标记）";
+    return;
   }
-  if (!target) { errorMsg.value = "请先进入要标记的盘符"; return; }
+  if (!target) { errorMsg.value = "请先选择要标记的盘符根"; return; }
   busy.value = true; statusMsg.value = "正在标记备份盘…";
   try {
     await invoke("mark_backup_disk", { drive: target });
@@ -117,7 +136,12 @@ async function openBackup() {
 async function openVerify() {
   errorMsg.value = "";
   try {
-    await openVerifyWindow({ drive: currentDrive.value, relPaths: [], isBackupDisk: currentIsBackup.value });
+    await openVerifyWindow({
+      drive: currentDrive.value,
+      relPaths: [],
+      paths: Array.from(selected.value),
+      isBackupDisk: currentIsBackup.value,
+    });
   } catch (e) { errorMsg.value = "打开校验窗口失败: " + String(e); }
 }
 
@@ -144,12 +168,12 @@ onMounted(() => { void goRoot(); });
       <div class="toolbar">
         <button class="btn small" title="全选当前列表中的所有项" @click="selectAllFiles">全选</button>
         <button class="btn small" title="清空当前勾选" @click="selected = new Set()">清空选择</button>
-        <button class="btn small primary-outline" title="将当前盘标记为 DataVault 备份盘（写入 .datavault）" :disabled="busy" @click="doMarkBackupDisk">标记为备份盘</button>
+        <button class="btn small primary-outline" title="仅可标记盘符根目录为备份盘（写入 .datavault）；子目录不可标记" :disabled="busy" @click="doMarkBackupDisk">标记为备份盘</button>
         <span class="muted">已选 {{ selected.size }} 项</span>
       </div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th style="width:36px"></th><th>名称</th><th style="width:80px">类型</th><th style="width:100px">大小</th><th style="width:90px">标记</th></tr></thead>
+          <thead><tr><th style="width:36px"></th><th>名称</th><th style="width:80px">类型</th><th style="width:100px">大小</th><th style="width:90px">标记</th><th style="width:70px">受控</th></tr></thead>
           <tbody>
             <tr v-for="e in entries" :key="e.path" :class="{ selected: selected.has(e.path) }" @dblclick="openEntry(e)">
               <td><input type="checkbox" :checked="selected.has(e.path)" @change="toggleSelect(e.path)" /></td>
@@ -157,8 +181,9 @@ onMounted(() => { void goRoot(); });
               <td>{{ e.is_dir ? "文件夹" : "文件" }}</td>
               <td>{{ e.is_dir ? "—" : formatSize(e.size) }}</td>
               <td><span v-if="e.is_backup_disk" class="badge backup">备份盘</span></td>
+              <td><span v-if="e.is_controlled" class="badge controlled" title="已在 vault.db 登记为受控">受控</span></td>
             </tr>
-            <tr v-if="!entries.length"><td colspan="5" class="muted center">空目录或无法访问</td></tr>
+            <tr v-if="!entries.length"><td colspan="6" class="muted center">空目录或无法访问</td></tr>
           </tbody>
         </table>
       </div>
@@ -192,4 +217,5 @@ tr.selected { background:#1e2a40; } tr:hover { background:#1a222e; }
 .muted { color:#9aa7b8; } .center { text-align:center; }
 .badge { font-size:0.75rem; background:#2f5bff; padding:2px 8px; border-radius:999px; margin-left:6px; }
 .badge.backup { background:#1f6b45; }
+.badge.controlled { background:#5b3db8; margin-left:0; }
 </style>

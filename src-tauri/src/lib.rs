@@ -32,6 +32,8 @@ pub struct DirEntryInfo {
     pub is_dir: bool,
     pub size: u64,
     pub is_backup_disk: bool,
+    /// File: recorded in vault.db. Dir: at least one controlled file under it.
+    pub is_controlled: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -196,6 +198,15 @@ fn detect_backup_disks() -> Result<Vec<DriveInfo>, String> {
 
 #[tauri::command]
 fn mark_backup_disk(drive: String) -> Result<DiskJson, String> {
+    // Only drive roots (e.g. E:\). Refuse subdirectory paths explicitly.
+    let trimmed = drive.trim().trim_end_matches(['\\', '/']);
+    let is_root = {
+        let chars: Vec<char> = trimmed.chars().collect();
+        chars.len() == 2 && chars[1] == ':' && chars[0].is_ascii_alphabetic()
+    };
+    if !is_root {
+        return Err("只能标记盘符根目录为备份盘（例如 E:\\），不能标记子目录".into());
+    }
     let root = disk::normalize_drive_root(&drive)?;
     disk::mark_backup_disk(&root)
 }
@@ -237,6 +248,16 @@ fn controlled_job_running() -> Result<bool, String> {
     Ok(job::is_running())
 }
 
+
+#[tauri::command]
+fn resolve_controlled_selection(
+    drive: String,
+    paths: Vec<String>,
+) -> Result<Vec<ControlledFile>, String> {
+    let root = disk::normalize_drive_root(&drive)?;
+    vault::resolve_controlled_selection(&root, &paths)
+}
+
 #[tauri::command]
 fn list_controlled_files(drive: String) -> Result<Vec<ControlledFile>, String> {
     let root = disk::normalize_drive_root(&drive)?;
@@ -272,6 +293,7 @@ fn list_dir(path: String) -> Result<Vec<DirEntryInfo>, String> {
                     is_dir: true,
                     size: 0,
                     is_backup_disk: d.is_backup_disk,
+                    is_controlled: false,
                 })
                 .collect()
         });
@@ -283,6 +305,27 @@ fn list_dir(path: String) -> Result<Vec<DirEntryInfo>, String> {
     if !p.is_dir() {
         return Err(format!("不是目录: {path}"));
     }
+
+    // Controlled-status overlay when browsing a backup disk
+    let drive_root = disk::drive_root_of(&p);
+    let controlled_rels: Vec<String> = if let Some(ref root) = drive_root {
+        if disk::is_backup_disk(root) {
+            vault::list_controlled_files(root)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|f| f.rel_path)
+                .collect()
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+    let controlled_lower: Vec<String> = controlled_rels
+        .iter()
+        .map(|s| s.to_lowercase())
+        .collect();
+
     let mut items = Vec::new();
     let entries = fs::read_dir(&p).map_err(|e| format!("无法读取目录（可能无权限）: {e}"))?;
     for entry in entries {
@@ -292,7 +335,6 @@ fn list_dir(path: String) -> Result<Vec<DirEntryInfo>, String> {
         };
         let ep = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
-        // Hide app metadata directory from explorer UI
         if name.eq_ignore_ascii_case(disk::META_DIR) {
             continue;
         }
@@ -302,12 +344,33 @@ fn list_dir(path: String) -> Result<Vec<DirEntryInfo>, String> {
         } else {
             fs::metadata(&ep).map(|m| m.len()).unwrap_or(0)
         };
+
+        let is_controlled = if controlled_lower.is_empty() {
+            false
+        } else if let Some(ref root) = drive_root {
+            match vault::normalize_rel_path(root, &ep) {
+                Ok(rel) => {
+                    let rel_l = rel.to_lowercase();
+                    if is_dir {
+                        let prefix = format!("{rel_l}\\");
+                        controlled_lower.iter().any(|c| c.starts_with(&prefix))
+                    } else {
+                        controlled_lower.iter().any(|c| c == &rel_l)
+                    }
+                }
+                Err(_) => false,
+            }
+        } else {
+            false
+        };
+
         items.push(DirEntryInfo {
             name,
             path: ep.to_string_lossy().to_string(),
             is_dir,
             size,
             is_backup_disk: false,
+            is_controlled,
         });
     }
     items.sort_by(|a, b| match (a.is_dir, b.is_dir) {
@@ -738,6 +801,7 @@ fn start_verify_controlled(
     drive: String,
     mode: String,
     rel_paths: Option<Vec<String>>,
+    paths: Option<Vec<String>>,
 ) -> Result<JobStart, String> {
     if VERIFY_RUNNING
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -770,10 +834,40 @@ fn start_verify_controlled(
                     message: "正在校验受控文件…".into(),
                 },
             );
-            let result = if mode == "full" {
-                verify_controlled_full(drive, rel_paths)
+            let filter = if let Some(ps) = paths {
+                if ps.is_empty() {
+                    rel_paths
+                } else {
+                    match disk::normalize_drive_root(&drive)
+                        .and_then(|root| vault::resolve_controlled_selection(&root, &ps))
+                    {
+                        Ok(files) => Some(files.into_iter().map(|f| f.rel_path).collect()),
+                        Err(e) => {
+                            let _ = app.emit(
+                                "verify-job-finished",
+                                VerifyJobFinished {
+                                    job_id: job_id.clone(),
+                                    kind: kind_s.clone(),
+                                    ok: false,
+                                    cancelled: false,
+                                    message: e,
+                                    controlled: None,
+                                    batch: None,
+                                },
+                            );
+                            VERIFY_RUNNING.store(false, Ordering::SeqCst);
+                            VERIFY_CANCEL.store(false, Ordering::SeqCst);
+                            return;
+                        }
+                    }
+                }
             } else {
-                verify_controlled_quick(drive, rel_paths)
+                rel_paths
+            };
+            let result = if mode == "full" {
+                verify_controlled_full(drive, filter)
+            } else {
+                verify_controlled_quick(drive, filter)
             };
             match result {
                 Ok(report) => {
@@ -923,6 +1017,7 @@ pub fn run() {
             cancel_controlled_job,
             controlled_job_running,
             list_controlled_files,
+            resolve_controlled_selection,
             verify_controlled_full,
             verify_controlled_quick,
             list_dir,

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref } from "vue";
+import { computed, onMounted, onUnmounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
@@ -34,11 +34,16 @@ interface VerifyJobFinished {
   controlled: ControlledVerifyReport | null; batch: VerifyReport | null;
 }
 interface JobStart { job_id: string; total: number; kind: string; }
+interface DirEntryInfo {
+  name: string; path: string; is_dir: boolean; size: number;
+  is_backup_disk: boolean; is_controlled: boolean;
+}
 
 const drive = ref("");
 const isBackupDisk = ref(false);
 const controlledFiles = ref<ControlledFile[]>([]);
 const selectedControlled = ref<Set<string>>(new Set());
+const pathFilterActive = ref(false);
 const controlledVerify = ref<ControlledVerifyReport | null>(null);
 const batchIds = ref<string[]>([]);
 const verifyBatchId = ref("");
@@ -47,19 +52,44 @@ const errorMsg = ref("");
 const statusMsg = ref("");
 const jobRunning = ref(false);
 const jobProgress = ref<JobProgress | null>(null);
+
+/** Mini browser: pick dirs/files on the backup disk to scope verify. */
+const browsePath = ref("");
+const browseEntries = ref<DirEntryInfo[]>([]);
+const browseSelected = ref<Set<string>>(new Set());
+const browseBusy = ref(false);
+
+let pendingAbsPaths: string[] = [];
 let unlisteners: UnlistenFn[] = [];
+
+const displayedControlled = computed(() => {
+  if (!pathFilterActive.value || selectedControlled.value.size === 0) {
+    return controlledFiles.value;
+  }
+  return controlledFiles.value.filter((f) => selectedControlled.value.has(f.rel_path));
+});
 
 async function applyCtx(ctx: VerifyContext) {
   drive.value = ctx.drive || "";
   isBackupDisk.value = !!ctx.isBackupDisk;
   selectedControlled.value = new Set(ctx.relPaths || []);
+  pendingAbsPaths = [...(ctx.paths || [])];
+  pathFilterActive.value = selectedControlled.value.size > 0 || pendingAbsPaths.length > 0;
   await refreshAll();
+  if (pendingAbsPaths.length) {
+    await resolveAbsPaths(pendingAbsPaths);
+    pendingAbsPaths = [];
+  }
+  if (drive.value && isBackupDisk.value) {
+    await loadBrowse(drive.value);
+  }
 }
 
 async function refreshAll() {
   controlledFiles.value = [];
   controlledVerify.value = null;
-  try { batchIds.value = await invoke<string[]>("list_batches");
+  try {
+    batchIds.value = await invoke<string[]>("list_batches");
     if (!verifyBatchId.value && batchIds.value.length) verifyBatchId.value = batchIds.value[0];
   } catch { batchIds.value = []; }
   if (!drive.value || !isBackupDisk.value) {
@@ -70,15 +100,95 @@ async function refreshAll() {
     } catch { /* ignore */ }
   }
   if (drive.value && isBackupDisk.value) {
-    try { controlledFiles.value = await invoke<ControlledFile[]>("list_controlled_files", { drive: drive.value }); }
-    catch { controlledFiles.value = []; }
+    try {
+      controlledFiles.value = await invoke<ControlledFile[]>("list_controlled_files", { drive: drive.value });
+    } catch { controlledFiles.value = []; }
   }
+}
+
+/** Resolve absolute file/dir picks to controlled-only rel_paths (vault.db). */
+async function resolveAbsPaths(paths: string[]) {
+  if (!drive.value || !paths.length) return;
+  try {
+    const hit = await invoke<ControlledFile[]>("resolve_controlled_selection", {
+      drive: drive.value,
+      paths,
+    });
+    selectedControlled.value = new Set(hit.map((f) => f.rel_path));
+    pathFilterActive.value = true;
+    statusMsg.value = hit.length
+      ? `已按所选目录/文件匹配 ${hit.length} 个受控项（未受控已忽略）`
+      : "所选路径下没有已受控文件";
+  } catch (e) {
+    errorMsg.value = String(e);
+  }
+}
+
+async function loadBrowse(path: string) {
+  browseBusy.value = true;
+  try {
+    const raw = await invoke<DirEntryInfo[]>("list_dir", { path });
+    // Only show controlled files, and dirs that contain controlled files (or any dir for navigation).
+    // Dirs always shown for navigation; files only if is_controlled.
+    browseEntries.value = raw.filter((e) => e.is_dir || e.is_controlled);
+    browsePath.value = path;
+    browseSelected.value = new Set();
+  } catch (e) {
+    errorMsg.value = String(e);
+  } finally {
+    browseBusy.value = false;
+  }
+}
+
+async function browseRoot() {
+  if (drive.value) await loadBrowse(drive.value);
+}
+async function browseUp() {
+  if (!browsePath.value) return;
+  const p = browsePath.value.replace(/[\\/]+$/, "");
+  const m = p.match(/^([A-Za-z]:)(?:\\|$)/);
+  if (m && (p === m[1] || p === m[1] + "\\")) { await browseRoot(); return; }
+  const idx = Math.max(p.lastIndexOf("\\"), p.lastIndexOf("/"));
+  if (idx <= 2) await loadBrowse(p.slice(0, 3));
+  else await loadBrowse(p.slice(0, idx));
+}
+function toggleBrowse(path: string) {
+  const next = new Set(browseSelected.value);
+  if (next.has(path)) next.delete(path); else next.add(path);
+  browseSelected.value = next;
+}
+async function openBrowseEntry(e: DirEntryInfo) {
+  if (e.is_dir) await loadBrowse(e.path);
+}
+
+async function applyBrowseSelection() {
+  errorMsg.value = "";
+  const paths = Array.from(browseSelected.value);
+  if (!paths.length) {
+    // Use current browse folder as scope
+    if (!browsePath.value) { errorMsg.value = "请勾选目录/文件，或进入要校验的目录"; return; }
+    await resolveAbsPaths([browsePath.value]);
+    return;
+  }
+  await resolveAbsPaths(paths);
+}
+
+function clearPathFilter() {
+  selectedControlled.value = new Set();
+  pathFilterActive.value = false;
+  statusMsg.value = "已清除范围，校验将针对全部受控文件";
 }
 
 function toggleControlled(rel: string) {
   const next = new Set(selectedControlled.value);
   if (next.has(rel)) next.delete(rel); else next.add(rel);
   selectedControlled.value = next;
+  pathFilterActive.value = next.size > 0;
+}
+
+function selectAllDisplayed() {
+  selectedControlled.value = new Set(displayedControlled.value.map((f) => f.rel_path));
+  pathFilterActive.value = selectedControlled.value.size > 0;
 }
 
 async function doVerifyControlled(mode: "full" | "quick") {
@@ -88,9 +198,13 @@ async function doVerifyControlled(mode: "full" | "quick") {
   try {
     jobRunning.value = true; jobProgress.value = null; controlledVerify.value = null;
     statusMsg.value = mode === "full" ? "完整校验进行中…" : "快速校验（FastMD5）进行中…";
-    const relPaths = selectedControlled.value.size > 0 ? Array.from(selectedControlled.value) : null;
+    const relPaths =
+      selectedControlled.value.size > 0 ? Array.from(selectedControlled.value) : null;
     const start = await invoke<JobStart>("start_verify_controlled", {
-      drive: drive.value, mode, relPaths,
+      drive: drive.value,
+      mode,
+      relPaths,
+      paths: null,
     });
     statusMsg.value = `校验任务 ${start.job_id} 已开始`;
   } catch (e) { jobRunning.value = false; errorMsg.value = String(e); statusMsg.value = ""; }
@@ -157,23 +271,61 @@ onUnmounted(() => { for (const u of unlisteners) u(); unlisteners = []; });
     </div>
     <div class="layout">
       <section class="panel">
+        <h2>按目录 / 文件选择范围</h2>
+        <p class="muted small">仅显示已受控项；勾选目录或文件后点「应用到校验范围」，未受控的不会进入结果。</p>
+        <div class="pathbar"><code>{{ browsePath || "（进入备份盘后浏览）" }}</code></div>
+        <div class="toolbar">
+          <button class="btn small" title="回到备份盘根" :disabled="browseBusy || !drive" @click="browseRoot">盘根</button>
+          <button class="btn small" title="上一级" :disabled="browseBusy || !browsePath" @click="browseUp">上级</button>
+          <button class="btn small" title="刷新" :disabled="browseBusy" @click="loadBrowse(browsePath || drive)">刷新</button>
+          <button class="btn small primary-outline" title="将勾选的目录/文件解析为受控项并勾选" :disabled="jobRunning || !isBackupDisk" @click="applyBrowseSelection">应用到校验范围</button>
+          <button class="btn small" title="清除范围，校验全部受控文件" @click="clearPathFilter">清除范围</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th style="width:36px"></th><th>名称</th><th style="width:70px">类型</th><th style="width:60px">受控</th></tr></thead>
+            <tbody>
+              <tr v-for="e in browseEntries" :key="e.path" :class="{ selected: browseSelected.has(e.path) }" @dblclick="openBrowseEntry(e)">
+                <td><input type="checkbox" :checked="browseSelected.has(e.path)" @change="toggleBrowse(e.path)" /></td>
+                <td class="name" @click="e.is_dir ? openBrowseEntry(e) : toggleBrowse(e.path)">{{ e.is_dir ? "📁" : "📄" }} {{ e.name }}</td>
+                <td>{{ e.is_dir ? "目录" : "文件" }}</td>
+                <td><span v-if="e.is_controlled" class="badge controlled">受控</span></td>
+              </tr>
+              <tr v-if="!browseEntries.length"><td colspan="4" class="muted center">无已受控项或未进入备份盘</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+      <section class="panel">
         <h2>受控文件校验</h2>
-        <p class="muted small">未勾选则校验全部受控文件。完整 = 全文 MD5；快速 = FastMD5。</p>
+        <p class="muted small">
+          列表仅含 vault.db 中的受控文件。
+          <span v-if="pathFilterActive">当前范围 {{ selectedControlled.size }} 项；</span>
+          未勾选则校验全部。完整 = 全文 MD5；快速 = FastMD5。
+        </p>
         <div class="row">
-          <button class="btn primary" title="按库中完整 MD5 校验受控文件" :disabled="jobRunning || !isBackupDisk" @click="doVerifyControlled('full')">完整校验</button>
-          <button class="btn" title="按库中 FastMD5 快速校验受控文件" :disabled="jobRunning || !isBackupDisk" @click="doVerifyControlled('quick')">快速校验</button>
+          <button class="btn primary" title="按库中 FastMD5 快速校验所选（或全部）受控文件" :disabled="jobRunning || !isBackupDisk" @click="doVerifyControlled('quick')">快速校验</button>
+          <button class="btn" title="按库中完整 MD5 校验所选（或全部）受控文件" :disabled="jobRunning || !isBackupDisk" @click="doVerifyControlled('full')">完整校验</button>
+          
           <button v-if="jobRunning" class="btn" title="取消正在进行的校验任务" @click="doCancel">取消</button>
         </div>
+        <div class="toolbar tight">
+          <button class="btn small" @click="selectAllDisplayed">全选当前列表</button>
+          <button class="btn small" @click="selectedControlled = new Set(); pathFilterActive = false">清空勾选</button>
+          <span class="muted">已勾选 {{ selectedControlled.size }} / 共 {{ controlledFiles.length }}</span>
+        </div>
         <ul class="result-list controlled">
-          <li v-for="f in controlledFiles" :key="f.rel_path">
+          <li v-for="f in displayedControlled" :key="f.rel_path">
             <label class="ctrl-row">
               <input type="checkbox" :checked="selectedControlled.has(f.rel_path)" @change="toggleControlled(f.rel_path)" />
-              <div><div class="rel">{{ f.rel_path }}</div>
+              <div>
+                <div class="rel">{{ f.rel_path }}</div>
                 <div class="hash">MD5 {{ f.md5 }}</div>
-                <div class="hash">Fast {{ f.fast_md5 }}</div></div>
+                <div class="hash">Fast {{ f.fast_md5 }}</div>
+              </div>
             </label>
           </li>
-          <li v-if="!controlledFiles.length" class="muted center">暂无受控文件</li>
+          <li v-if="!displayedControlled.length" class="muted center">暂无受控文件</li>
         </ul>
         <div v-if="controlledVerify" class="verify-summary">
           <p>{{ controlledVerify.mode === "full" ? "完整" : "快速" }}：通过
@@ -199,8 +351,9 @@ onUnmounted(() => { for (const u of unlisteners) u(); unlisteners = []; });
           </select>
         </label>
         <div class="row">
-          <button class="btn primary" title="对所选批次做完整校验" :disabled="jobRunning" @click="doVerifyBatch('full')">完整校验</button>
-          <button class="btn" title="对所选批次做快速校验" :disabled="jobRunning" @click="doVerifyBatch('quick')">快速校验</button>
+          <button class="btn primary" title="对所选批次做快速校验" :disabled="jobRunning" @click="doVerifyBatch('quick')">快速校验</button>
+          <button class="btn" title="对所选批次做完整校验" :disabled="jobRunning" @click="doVerifyBatch('full')">完整校验</button>
+          
         </div>
         <div v-if="verifyReport" class="verify-summary">
           <p>{{ verifyReport.mode === "full" ? "完整" : "快速" }}：通过
@@ -232,7 +385,7 @@ h1 { margin:0; font-size:1.25rem; } .sub { color:#7aa2ff; font-weight:500; font-
 .progress-track { height:8px; background:#0f1419; border-radius:999px; overflow:hidden; }
 .progress-fill { height:100%; background:linear-gradient(90deg,#2f5bff,#6d9bff); }
 .progress-file { margin-top:6px; font-size:0.78rem; color:#9aa7b8; word-break:break-all; }
-.layout { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+.layout { display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px; }
 .panel { background:#171d25; border:1px solid #2a3442; border-radius:12px; padding:12px; max-height:calc(100vh - 140px); overflow:auto; }
 h2 { margin:0 0 8px; font-size:0.95rem; }
 .field { display:flex; flex-direction:column; gap:4px; margin-bottom:10px; font-size:0.8rem; color:#9aa7b8; }
@@ -241,10 +394,21 @@ select { background:#0f1419; border:1px solid #2a3442; color:#e7ecf3; border-rad
 .btn { background:#243044; color:#e7ecf3; border:1px solid #3a4a63; border-radius:8px; padding:8px 12px; cursor:pointer; font-size:0.85rem; flex:1; }
 .btn:disabled { opacity:0.5; cursor:not-allowed; }
 .btn.primary { background:#2f5bff; border-color:#2f5bff; font-weight:600; }
+.btn.primary-outline { border-color:#2f5bff; color:#9db4ff; background:transparent; flex:0; }
 .btn.ghost { background:transparent; flex:0; width:auto; }
+.btn.small { padding:4px 8px; font-size:0.78rem; flex:0; }
 .muted { color:#9aa7b8; } .small { font-size:0.78rem; } .center { text-align:center; }
 .pass { color:#6dffa0; } .fail { color:#ff8f8f; }
 .badge { font-size:0.72rem; background:#1f6b45; padding:2px 8px; border-radius:999px; margin-left:6px; }
+.badge.controlled { background:#5b3db8; margin-left:0; }
+.pathbar { margin-bottom:6px; } .pathbar code { display:block; background:#0f1419; padding:6px 8px; border-radius:6px; border:1px solid #2a3442; font-size:0.78rem; word-break:break-all; }
+.toolbar { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:8px; align-items:center; }
+.toolbar.tight { margin-top:8px; }
+.table-wrap { border:1px solid #2a3442; border-radius:8px; max-height:220px; overflow:auto; }
+table { width:100%; border-collapse:collapse; font-size:0.8rem; }
+th, td { padding:6px 8px; text-align:left; border-bottom:1px solid #243041; }
+th { background:#1c2430; color:#9aa7b8; position:sticky; top:0; }
+tr.selected { background:#1e2a40; } .name { cursor:pointer; }
 .result-list { list-style:none; padding:0; margin:8px 0 0; max-height:280px; overflow:auto; }
 .result-list.controlled { max-height:200px; }
 .result-list li { padding:8px; border-radius:8px; margin-bottom:6px; border:1px solid #2a3442; font-size:0.78rem; }
@@ -253,5 +417,5 @@ select { background:#0f1419; border:1px solid #2a3442; color:#e7ecf3; border-rad
 .ctrl-row { display:flex; gap:8px; align-items:flex-start; cursor:pointer; }
 .rel { font-weight:600; } .hash { font-family:ui-monospace,Consolas,monospace; color:#9aa7b8; word-break:break-all; }
 .verify-summary { margin-top:10px; }
-@media (max-width:800px) { .layout { grid-template-columns:1fr; } }
+@media (max-width:1100px) { .layout { grid-template-columns:1fr; } }
 </style>

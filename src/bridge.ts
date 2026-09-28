@@ -14,7 +14,10 @@ export interface BackupContext {
 
 export interface VerifyContext {
   drive: string;
+  /** Pre-selected controlled rel_paths (from vault.db). */
   relPaths: string[];
+  /** Absolute file/dir paths to resolve against vault.db (uncontrolled skipped). */
+  paths: string[];
   isBackupDisk: boolean;
 }
 
@@ -64,7 +67,7 @@ export async function openBackupWindow(ctx: BackupContext): Promise<void> {
 
 export async function openVerifyWindow(ctx: VerifyContext): Promise<void> {
   localStorage.setItem(LS_VERIFY, JSON.stringify(ctx));
-  await openOrFocusWindow("verify", "DataVault · 校验", 780, 620);
+  await openOrFocusWindow("verify", "DataVault · 校验", 1100, 720);
   await emit(EVT_VERIFY_CTX, ctx);
 }
 
