@@ -15,10 +15,6 @@ interface BackupBatch {
   id: string; created_at: string; sources: string[];
   destination_root: string; files: FileMeta[];
 }
-interface ControlledFile {
-  rel_path: string; size: number; mtime: number; md5: string; fast_md5: string;
-  sample_ratio: number; sample_chunk_mb: number; updated_at: string;
-}
 interface ControlledVerifyItem {
   rel_path: string; status: string; message: string;
   expected: string | null; actual: string | null;
@@ -69,8 +65,6 @@ const batchIds = ref<string[]>([]);
 const verifyBatchId = ref("");
 const verifyReport = ref<VerifyReport | null>(null);
 const controlledVerify = ref<ControlledVerifyReport | null>(null);
-const pathFilterActive = ref(false);
-const selectedControlled = ref<Set<string>>(new Set());
 
 const backupDriveSet = ref<Set<string>>(new Set());
 const currentIsBackup = ref(false);
@@ -83,6 +77,21 @@ const currentDrive = computed(() => {
   return m ? m[1].toUpperCase() + "\\" : "";
 });
 const hasSelection = computed(() => selected.value.size > 0);
+
+/** Drive for indexing: current backup path, or one selected backup drive root at 盘符 list. */
+function resolveIndexDrive(): string {
+  if (currentIsBackup.value && currentDrive.value) return currentDrive.value;
+  if (!currentPath.value && selected.value.size > 0) {
+    for (const p of selected.value) {
+      if (!isDriveRootPath(p)) continue;
+      const key = p.replace(/\//g, "\\").toUpperCase();
+      const norm = key.endsWith("\\") ? key : key + "\\";
+      if (backupDriveSet.value.has(norm) || backupDriveSet.value.has(key)) return norm;
+    }
+  }
+  return "";
+}
+const canIndex = computed(() => !!resolveIndexDrive());
 
 function formatSize(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -220,65 +229,36 @@ async function doAddControlled() {
 
 async function doIndex() {
   errorMsg.value = ""; statusMsg.value = "";
-  if (!currentIsBackup.value || !currentDrive.value) {
-    errorMsg.value = "请先进入已标记的备份盘"; return;
+  const drive = resolveIndexDrive();
+  if (!drive) {
+    errorMsg.value = "请先进入已标记的备份盘，或在盘符列表勾选一个备份盘"; return;
   }
-  if (selected.value.size === 0) { errorMsg.value = "请先勾选要建立索引的文件或目录"; return; }
   if (jobRunning.value) { errorMsg.value = "已有任务在进行中"; return; }
   try {
     jobRunning.value = true; jobProgress.value = null;
     statusMsg.value = "正在扫描备份盘并建立索引…";
-    const start = await invoke<JobStart>("start_index_backup_disk", { drive: currentDrive.value });
+    const start = await invoke<JobStart>("start_index_backup_disk", { drive });
     statusMsg.value = `索引任务 ${start.job_id} 已开始`;
   } catch (e) { jobRunning.value = false; errorMsg.value = String(e); statusMsg.value = ""; }
 }
 
-/** Apply browse selection as controlled verify scope (absolute paths → vault.db). */
-async function applySelectionAsVerifyScope() {
-  errorMsg.value = "";
-  if (!currentIsBackup.value || !currentDrive.value) {
-    errorMsg.value = "请先进入备份盘"; return false;
-  }
-  const paths = Array.from(selected.value);
-  if (!paths.length) {
-    if (!currentPath.value) { errorMsg.value = "请勾选目录/文件，或进入要校验的目录"; return false; }
-    paths.push(currentPath.value);
-  }
-  try {
-    const hit = await invoke<ControlledFile[]>("resolve_controlled_selection", {
-      drive: currentDrive.value, paths,
-    });
-    selectedControlled.value = new Set(hit.map((f) => f.rel_path));
-    pathFilterActive.value = true;
-    statusMsg.value = hit.length
-      ? `已按所选匹配 ${hit.length} 个受控项（未受控已忽略）`
-      : "所选路径下没有已受控文件";
-    return hit.length > 0;
-  } catch (e) { errorMsg.value = String(e); return false; }
-}
-
-function clearVerifyScope() {
-  selectedControlled.value = new Set();
-  pathFilterActive.value = false;
-  statusMsg.value = "已清除校验范围，将校验全部受控文件";
-}
-
-async function doVerifyControlled(mode: "full" | "quick", fromSelection: boolean) {
+/** Verify controlled files: use current browse selection as paths filter; none → all. */
+async function doVerifyControlled(mode: "full" | "quick") {
   errorMsg.value = ""; statusMsg.value = "";
   if (!currentIsBackup.value || !currentDrive.value) { errorMsg.value = "当前没有备份盘上下文"; return; }
   if (jobRunning.value) { errorMsg.value = "已有任务在进行中"; return; }
-  if (fromSelection) {
-    const ok = await applySelectionAsVerifyScope();
-    if (!ok && pathFilterActive.value && selectedControlled.value.size === 0) return;
-  }
   try {
     jobRunning.value = true; jobProgress.value = null;
     controlledVerify.value = null; verifyReport.value = null;
-    statusMsg.value = mode === "full" ? "完整校验进行中…" : "快速校验（FastMD5）进行中…";
-    const relPaths =
-      selectedControlled.value.size > 0 ? Array.from(selectedControlled.value) : null;
+    const sel = Array.from(selected.value);
+    statusMsg.value = mode === "full"
+      ? (sel.length ? "按勾选完整校验进行中…" : "全部受控完整校验进行中…")
+      : (sel.length ? "按勾选快速校验进行中…" : "全部受控快速校验进行中…");
     const start = await invoke<JobStart>("start_verify_controlled", {
-      drive: currentDrive.value, mode, relPaths, paths: null,
+      drive: currentDrive.value,
+      mode,
+      relPaths: null,
+      paths: sel.length ? sel : null,
     });
     statusMsg.value = `校验任务 ${start.job_id} 已开始`;
   } catch (e) { jobRunning.value = false; errorMsg.value = String(e); statusMsg.value = ""; }
@@ -351,31 +331,33 @@ onUnmounted(() => { for (const u of unlisteners) u(); unlisteners = []; });
           <span v-if="currentIsBackup" class="badge backup">备份盘 {{ currentDrive }}</span>
         </p>
       </div>
-      <div class="header-actions">
-        <button class="btn ghost" title="返回盘符列表" :disabled="busy" @click="goRoot">盘符</button>
-        <button class="btn ghost" title="返回上一级" :disabled="busy || !currentPath" @click="goUp">上级</button>
-        <button class="btn ghost" title="刷新当前目录" :disabled="busy" @click="loadDir(currentPath)">刷新</button>
-        <button v-if="jobRunning" class="btn" title="取消正在进行的后台任务" @click="doCancel">取消任务</button>
-      </div>
     </header>
 
     <div v-if="errorMsg" class="banner error">{{ errorMsg }}</div>
     <div v-if="statusMsg" class="banner ok">{{ statusMsg }}</div>
-    <div v-if="jobRunning && jobProgress" class="banner progress">
-      <div class="progress-meta">
-        <span>{{ jobProgress.phase }}</span>
-        <span v-if="jobProgress.total">{{ jobProgress.current }} / {{ jobProgress.total }}</span>
+    <div v-if="jobRunning" class="banner progress">
+      <div class="progress-row">
+        <div class="progress-main">
+          <div class="progress-meta">
+            <span>{{ jobProgress ? jobProgress.phase : "任务进行中…" }}</span>
+            <span v-if="jobProgress && jobProgress.total">{{ jobProgress.current }} / {{ jobProgress.total }}</span>
+          </div>
+          <div class="progress-track">
+            <div class="progress-fill" :style="{ width: jobProgress && jobProgress.total ? Math.min(100, (100 * jobProgress.current) / jobProgress.total) + '%' : '15%' }"></div>
+          </div>
+          <div v-if="jobProgress && jobProgress.rel_path" class="progress-file">{{ jobProgress.rel_path }}</div>
+        </div>
+        <button class="btn small" title="取消正在进行的后台任务" @click="doCancel">取消任务</button>
       </div>
-      <div class="progress-track">
-        <div class="progress-fill" :style="{ width: jobProgress.total ? Math.min(100, (100 * jobProgress.current) / jobProgress.total) + '%' : '15%' }"></div>
-      </div>
-      <div v-if="jobProgress.rel_path" class="progress-file">{{ jobProgress.rel_path }}</div>
     </div>
 
     <div class="layout">
       <section class="panel explorer">
-        <div class="pathbar"><span class="label">当前位置</span><code>{{ pathLabel }}</code></div>
         <div class="toolbar">
+          <button class="btn small" title="返回盘符列表" :disabled="busy" @click="goRoot">盘符</button>
+          <button class="btn small" title="返回上一级" :disabled="busy || !currentPath" @click="goUp">上级</button>
+          <button class="btn small" title="刷新当前目录" :disabled="busy" @click="loadDir(currentPath)">刷新</button>
+          <span class="pathbar-inline"><span class="label">当前位置</span><code>{{ pathLabel }}</code></span>
           <button class="btn small" title="全选当前列表" @click="selectAllFiles">全选</button>
           <button class="btn small" title="清空勾选" @click="clearSelection">清空选择</button>
           <button class="btn small primary-outline" title="将勾选设为备份源" @click="useSelectedAsSources">设为备份源</button>
@@ -426,30 +408,21 @@ onUnmounted(() => { for (const u of unlisteners) u(); unlisteners = []; });
 
         <section class="panel">
           <h2>受控 / 索引</h2>
-          <p class="muted small">须先勾选文件/目录。已在 vault.db 中的跳过，不重算哈希。</p>
-          <button class="btn primary-outline" title="将勾选路径登记为受控并计算 MD5/FastMD5（未勾选不可用）"
-            :disabled="jobRunning || !currentIsBackup || !hasSelection" @click="doAddControlled">添加受控文件</button>
-          <button class="btn primary-outline" title="须先勾选；扫描备份盘并为未受控文件建索引（未勾选不可用）"
-            :disabled="jobRunning || !currentIsBackup || !hasSelection" @click="doIndex">建立备份索引</button>
+          <p class="muted small">添加受控须先勾选文件/目录；建立索引在进入备份盘或勾选备份盘符后即可。已在 vault.db 中的跳过，不重算哈希。</p>
+          <div class="row">
+            <button class="btn primary-outline" title="将勾选路径登记为受控并计算 MD5/FastMD5（未勾选不可用）"
+              :disabled="jobRunning || !currentIsBackup || !hasSelection" @click="doAddControlled">添加受控文件</button>
+            <button class="btn primary-outline" title="进入备份盘或勾选备份盘符后即可扫描全盘并为未受控文件建索引"
+              :disabled="jobRunning || !canIndex" @click="doIndex">建立备份索引</button>
+          </div>
         </section>
 
         <section class="panel">
           <h2>校验</h2>
-          <p class="muted small">
-            按浏览勾选限定范围（仅已受控）；未限定则校验全部受控。
-            <span v-if="pathFilterActive">当前范围 {{ selectedControlled.size }} 项。</span>
-          </p>
+          <p class="muted small">直接使用当前勾选的目录/文件（仅其中已受控项）；未勾选则校验全部受控。</p>
           <div class="row">
-            <button class="btn small" title="将勾选目录/文件解析为受控范围" :disabled="jobRunning || !currentIsBackup" @click="applySelectionAsVerifyScope">应用到校验范围</button>
-            <button class="btn small" title="清除范围，校验全部受控" @click="clearVerifyScope">清除范围</button>
-          </div>
-          <div class="row" style="margin-top:8px">
-            <button class="btn primary" title="按勾选范围（或全部）快速校验" :disabled="jobRunning || !currentIsBackup" @click="doVerifyControlled('quick', true)">范围快速校验</button>
-            <button class="btn" title="按勾选范围（或全部）完整校验" :disabled="jobRunning || !currentIsBackup" @click="doVerifyControlled('full', true)">范围完整校验</button>
-          </div>
-          <div class="row" style="margin-top:8px">
-            <button class="btn primary-outline" title="校验当前范围或全部受控（不重新解析勾选）" :disabled="jobRunning || !currentIsBackup" @click="doVerifyControlled('quick', false)">受控快速</button>
-            <button class="btn primary-outline" title="完整 MD5 校验当前范围或全部受控" :disabled="jobRunning || !currentIsBackup" @click="doVerifyControlled('full', false)">受控完整</button>
+            <button class="btn primary" title="按当前勾选（或全部）快速校验" :disabled="jobRunning || !currentIsBackup" @click="doVerifyControlled('quick')">快速校验</button>
+            <button class="btn" title="按当前勾选（或全部）完整校验" :disabled="jobRunning || !currentIsBackup" @click="doVerifyControlled('full')">完整校验</button>
           </div>
           <label class="field" style="margin-top:10px"><span>备份批次</span>
             <select v-model="verifyBatchId">
@@ -495,7 +468,7 @@ onUnmounted(() => { for (const u of unlisteners) u(); unlisteners = []; });
           </li>
         </ul>
       </div>
-      <p v-if="!controlledVerify && !verifyReport" class="muted center empty-results">暂无校验结果。在上方执行范围/受控/批次校验后显示于此。</p>
+      <p v-if="!controlledVerify && !verifyReport" class="muted center empty-results">暂无校验结果。在上方执行受控/批次校验后显示于此。</p>
     </section>
   </div>
 </template>
@@ -558,4 +531,12 @@ input[type="text"], select { background:#0f1419; border:1px solid #2a3442; color
 .rel { font-weight:600; } .hash { font-family:ui-monospace,Consolas,monospace; color:#9aa7b8; word-break:break-all; }
 .verify-summary { margin-top:8px; }
 @media (max-width:1000px) { .layout { grid-template-columns:1fr; } .explorer { max-height:none; } }
+
+.progress-row { display:flex; align-items:center; gap:12px; }
+.progress-main { flex:1; min-width:0; }
+
+.pathbar-inline { display:inline-flex; align-items:center; gap:6px; margin:0 4px; min-width:0; flex:1; }
+.pathbar-inline .label { color:#8b9bb4; font-size:12px; white-space:nowrap; }
+.pathbar-inline code { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:12px; }
+.header-actions:empty { display:none; }
 </style>
