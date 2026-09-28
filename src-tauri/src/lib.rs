@@ -1202,7 +1202,7 @@ fn start_verify_backup(
     Ok(JobStart {
         job_id: job_id_ret,
         total: 0,
-        kind: kind.clone(),
+        kind: kind.to_string(),
     })
 }
 
