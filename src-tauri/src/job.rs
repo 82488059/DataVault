@@ -1,4 +1,4 @@
-﻿//! Background jobs (index/add/backup/verify) — multiple can run in parallel; each has its own cancel flag.
+//! Background jobs (index/add/backup/verify) — multiple can run in parallel; each has its own cancel flag.
 
 use crate::disk;
 use crate::vault::{self, ControlledFile};
@@ -7,7 +7,6 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
 
 pub const EVT_PROGRESS: &str = "controlled-job-progress";
@@ -51,12 +50,10 @@ pub struct JobFinished {
     pub files: Vec<ControlledFile>,
 }
 
+/// Job id numeric part: local 年月日时分秒 (YYYYMMDDHHmmss), e.g. batch-20260928160700.
 fn new_job_id(prefix: &str) -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    format!("{prefix}-{nanos}")
+    let stamp = chrono::Local::now().format("%Y%m%d%H%M%S").to_string();
+    format!("{prefix}-{stamp}")
 }
 
 /// Register a new job; returns (job_id, cancel flag). Caller must `finish_job` when done.

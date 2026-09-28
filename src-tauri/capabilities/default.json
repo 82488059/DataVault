@@ -1,11 +1,12 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main window (backup and verify are in-main)",
-  "windows": ["main"],
+  "description": "Capability for main, advanced-verify (batches), and advanced-backup windows",
+  "windows": ["main", "batches", "adv-backup"],
   "permissions": [
     "core:default",
     "opener:default",
+    "core:webview:allow-create-webview-window",
     "core:window:allow-close",
     "core:window:allow-set-focus",
     "core:window:allow-unminimize",

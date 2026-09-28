@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { openAdvancedVerifyWindow, openAdvancedBackupWindow } from "../bridge";
 
 interface DirEntryInfo {
   name: string; path: string; is_dir: boolean; size: number;
@@ -332,6 +333,20 @@ async function doVerifyControlled(mode: "full" | "quick") {
   } catch (e) { errorMsg.value = String(e); statusMsg.value = ""; }
 }
 
+async function openAdvancedVerify() {
+  errorMsg.value = ""; statusMsg.value = "";
+  try {
+    await openAdvancedVerifyWindow();
+    statusMsg.value = "已打开高级校验窗口";
+  } catch (e) { errorMsg.value = String(e); }
+}
+async function openAdvancedBackup() {
+  errorMsg.value = ""; statusMsg.value = "";
+  try {
+    await openAdvancedBackupWindow();
+    statusMsg.value = "已打开高级备份窗口";
+  } catch (e) { errorMsg.value = String(e); }
+}
 async function doVerifyBatch(mode: "full" | "quick") {
   errorMsg.value = ""; statusMsg.value = "";
   if (!verifyBatchId.value) { errorMsg.value = "请选择要校验的批次"; return; }
@@ -507,6 +522,7 @@ onUnmounted(() => { for (const u of unlisteners) u(); unlisteners = []; });
             <button class="btn primary" title="对所选批次做快速校验" @click="doVerifyBatch('quick')">批次快速校验</button>
             <button class="btn" title="对所选批次做完整校验" @click="doVerifyBatch('full')">批次完整校验</button>
           </div>
+          <button class="btn primary-outline" style="margin-top:8px" title="打开高级校验窗口：批次号/时间/文件数/盘符，可多选校验" @click="openAdvancedVerify">高级校验…</button>
         </section>
 
         <section class="panel">
@@ -521,6 +537,7 @@ onUnmounted(() => { for (const u of unlisteners) u(); unlisteners = []; });
             <input v-model="destPath" type="text" placeholder="例如 E:\Backup\DataVault" title="备份复制到此目录" />
           </label>
           <button class="btn primary" title="开始将源复制到目标并写批次（可与其它任务并行）" @click="doBackup">开始备份</button>
+          <button class="btn primary-outline" style="margin-top:8px" title="打开双栏高级备份：左多选源，右单选备份盘/子目录" @click="openAdvancedBackup">高级备份…</button>
           <p v-if="lastBatch" class="muted small">最近批次：<strong>{{ lastBatch.id }}</strong>（{{ lastBatch.files.length }} 个文件）</p>
         </section>
 

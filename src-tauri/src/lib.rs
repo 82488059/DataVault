@@ -85,20 +85,13 @@ fn metadata_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     Ok(root)
 }
 
+/// Backup batch id: local wall-clock 年月日时分秒, e.g. 20260928160700.
 fn now_id() -> String {
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    format!("batch-{secs}")
+    chrono::Local::now().format("%Y%m%d%H%M%S").to_string()
 }
 
 fn now_stamp() -> String {
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    format!("{secs}")
+    chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string()
 }
 
 fn read_window(file: &mut File, offset: u64, len: u64) -> Result<Vec<u8>, String> {
