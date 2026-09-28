@@ -87,7 +87,6 @@ const currentDrive = computed(() => {
   const m = currentPath.value.match(/^([A-Za-z]:)/);
   return m ? m[1].toUpperCase() + "\\" : "";
 });
-const hasSelection = computed(() => selected.value.size > 0);
 const hasJobs = computed(() => activeJobs.value.length > 0);
 
 function kindLabel(kind: string): string {
