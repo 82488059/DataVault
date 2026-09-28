@@ -1,3 +1,7 @@
+mod disk;
+mod hashutil;
+mod vault;
+
 use md5::{Digest, Md5};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
@@ -6,7 +10,17 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::Manager;
 
+use disk::DiskJson;
+use hashutil::{compute_fast_md5, compute_md5_full};
+use vault::{ControlledFile, ControlledVerifyReport};
+
 const SAMPLE_WINDOW: u64 = 64 * 1024;
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DriveInfo {
+    pub path: String,
+    pub is_backup_disk: bool,
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DirEntryInfo {
@@ -14,6 +28,7 @@ pub struct DirEntryInfo {
     pub path: String,
     pub is_dir: bool,
     pub size: u64,
+    pub is_backup_disk: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -98,21 +113,8 @@ fn read_window(file: &mut File, offset: u64, len: u64) -> Result<Vec<u8>, String
     Ok(buf)
 }
 
-fn compute_md5_full(path: &Path) -> Result<String, String> {
-    let mut file = File::open(path).map_err(|e| format!("打开失败 {}: {e}", path.display()))?;
-    let mut hasher = Md5::new();
-    let mut buf = [0u8; 64 * 1024];
-    loop {
-        let n = file.read(&mut buf).map_err(|e| format!("读取失败: {e}"))?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-    Ok(format!("{:x}", hasher.finalize()))
-}
-
-fn compute_md5_quick(path: &Path) -> Result<String, String> {
+/// Legacy quick MD5 for batch backup verify (head/tail 64KiB + size).
+fn compute_md5_quick_legacy(path: &Path) -> Result<String, String> {
     let meta = fs::metadata(path).map_err(|e| format!("元数据失败 {}: {e}", path.display()))?;
     let size = meta.len();
     let mut file = File::open(path).map_err(|e| format!("打开失败 {}: {e}", path.display()))?;
@@ -166,15 +168,66 @@ fn collect_files(src: &Path, base: &Path, out: &mut Vec<(PathBuf, PathBuf)>) -> 
 }
 
 #[tauri::command]
-fn list_drives() -> Result<Vec<String>, String> {
+fn list_drives() -> Result<Vec<DriveInfo>, String> {
     let mut drives = Vec::new();
     for letter in b'A'..=b'Z' {
         let root = format!("{}:\\", letter as char);
-        if Path::new(&root).exists() {
-            drives.push(root);
+        let p = Path::new(&root);
+        if p.exists() {
+            drives.push(DriveInfo {
+                path: root.clone(),
+                is_backup_disk: disk::is_backup_disk(p),
+            });
         }
     }
     Ok(drives)
+}
+
+#[tauri::command]
+fn detect_backup_disks() -> Result<Vec<DriveInfo>, String> {
+    Ok(list_drives()?
+        .into_iter()
+        .filter(|d| d.is_backup_disk)
+        .collect())
+}
+
+#[tauri::command]
+fn mark_backup_disk(drive: String) -> Result<DiskJson, String> {
+    let root = disk::normalize_drive_root(&drive)?;
+    disk::mark_backup_disk(&root)
+}
+
+#[tauri::command]
+fn add_controlled_files(drive: String, paths: Vec<String>) -> Result<Vec<ControlledFile>, String> {
+    if paths.is_empty() {
+        return Err("未选择任何文件".into());
+    }
+    let root = disk::normalize_drive_root(&drive)?;
+    vault::add_controlled_files(&root, &paths)
+}
+
+#[tauri::command]
+fn list_controlled_files(drive: String) -> Result<Vec<ControlledFile>, String> {
+    let root = disk::normalize_drive_root(&drive)?;
+    vault::list_controlled_files(&root)
+}
+
+#[tauri::command]
+fn verify_controlled_full(
+    drive: String,
+    rel_paths: Option<Vec<String>>,
+) -> Result<ControlledVerifyReport, String> {
+    let root = disk::normalize_drive_root(&drive)?;
+    vault::verify_controlled(&root, "full", rel_paths)
+}
+
+#[tauri::command]
+fn verify_controlled_quick(
+    drive: String,
+    rel_paths: Option<Vec<String>>,
+) -> Result<ControlledVerifyReport, String> {
+    let root = disk::normalize_drive_root(&drive)?;
+    vault::verify_controlled(&root, "quick", rel_paths)
 }
 
 #[tauri::command]
@@ -183,10 +236,11 @@ fn list_dir(path: String) -> Result<Vec<DirEntryInfo>, String> {
         return list_drives().map(|ds| {
             ds.into_iter()
                 .map(|d| DirEntryInfo {
-                    name: d.clone(),
-                    path: d,
+                    name: d.path.clone(),
+                    path: d.path,
                     is_dir: true,
                     size: 0,
+                    is_backup_disk: d.is_backup_disk,
                 })
                 .collect()
         });
@@ -218,6 +272,7 @@ fn list_dir(path: String) -> Result<Vec<DirEntryInfo>, String> {
             path: ep.to_string_lossy().to_string(),
             is_dir,
             size,
+            is_backup_disk: false,
         });
     }
     items.sort_by(|a, b| match (a.is_dir, b.is_dir) {
@@ -235,7 +290,17 @@ fn md5_full(path: String) -> Result<String, String> {
 
 #[tauri::command]
 fn md5_quick(path: String) -> Result<String, String> {
-    compute_md5_quick(Path::new(&path))
+    // Legacy head/tail for ad-hoc; FastMD5 is used for controlled files.
+    compute_md5_quick_legacy(Path::new(&path))
+}
+
+#[tauri::command]
+fn md5_fast(path: String, sample_ratio: Option<f64>, sample_chunk_mb: Option<i64>) -> Result<String, String> {
+    compute_fast_md5(
+        Path::new(&path),
+        sample_ratio.unwrap_or(hashutil::DEFAULT_SAMPLE_RATIO),
+        sample_chunk_mb.unwrap_or(hashutil::DEFAULT_SAMPLE_CHUNK_MB),
+    )
 }
 
 #[tauri::command]
@@ -309,7 +374,7 @@ fn backup_paths(
             match fs::copy(&abs, &dest_path) {
                 Ok(_) => {
                     let size = fs::metadata(&dest_path).map(|m| m.len()).unwrap_or(0);
-                    let quick = compute_md5_quick(&abs).ok();
+                    let quick = compute_md5_quick_legacy(&abs).ok();
                     files_meta.push(FileMeta {
                         rel_path: rel.to_string_lossy().to_string(),
                         src_path: abs.to_string_lossy().to_string(),
@@ -426,7 +491,10 @@ fn verify_backup(
         let (src_hash, dest_hash) = if use_full {
             (compute_md5_full(src), compute_md5_full(dest))
         } else {
-            (compute_md5_quick(src), compute_md5_quick(dest))
+            (
+                compute_md5_quick_legacy(src),
+                compute_md5_quick_legacy(dest),
+            )
         };
         match (src_hash, dest_hash) {
             (Ok(sh), Ok(dh)) => {
@@ -484,9 +552,16 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             list_drives,
+            detect_backup_disks,
+            mark_backup_disk,
+            add_controlled_files,
+            list_controlled_files,
+            verify_controlled_full,
+            verify_controlled_quick,
             list_dir,
             md5_full,
             md5_quick,
+            md5_fast,
             backup_paths,
             load_batch,
             list_batches,

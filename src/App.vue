@@ -7,6 +7,7 @@ interface DirEntryInfo {
   path: string;
   is_dir: boolean;
   size: number;
+  is_backup_disk: boolean;
 }
 
 interface FileMeta {
@@ -45,6 +46,37 @@ interface VerifyReport {
   failed: number;
 }
 
+interface ControlledFile {
+  rel_path: string;
+  size: number;
+  mtime: number;
+  md5: string;
+  fast_md5: string;
+  sample_ratio: number;
+  sample_chunk_mb: number;
+  updated_at: string;
+}
+
+interface ControlledVerifyItem {
+  rel_path: string;
+  status: string;
+  message: string;
+  expected: string | null;
+  actual: string | null;
+  size_changed: boolean;
+  mtime_changed: boolean;
+}
+
+interface ControlledVerifyReport {
+  drive_root: string;
+  mode: string;
+  items: ControlledVerifyItem[];
+  passed: number;
+  failed: number;
+  missing: number;
+  errors: number;
+}
+
 const currentPath = ref("");
 const entries = ref<DirEntryInfo[]>([]);
 const selected = ref<Set<string>>(new Set());
@@ -58,13 +90,41 @@ const batchIds = ref<string[]>([]);
 const verifyBatchId = ref("");
 const verifyReport = ref<VerifyReport | null>(null);
 
+const controlledFiles = ref<ControlledFile[]>([]);
+const controlledVerify = ref<ControlledVerifyReport | null>(null);
+const selectedControlled = ref<Set<string>>(new Set());
+
 const pathLabel = computed(() => currentPath.value || "此电脑（盘符）");
+
+const currentDrive = computed(() => {
+  const m = currentPath.value.match(/^([A-Za-z]:)/);
+  return m ? m[1].toUpperCase() + "\\" : "";
+});
+
+const backupDriveSet = ref<Set<string>>(new Set());
+const currentIsBackup = ref(false);
 
 function formatSize(n: number): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
   if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
   return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
+
+async function refreshBackupDrives() {
+  try {
+    const drives = await invoke<{ path: string; is_backup_disk: boolean }[]>("list_drives");
+    const next = new Set<string>();
+    for (const d of drives) {
+      if (d.is_backup_disk) next.add(d.path.toUpperCase());
+    }
+    backupDriveSet.value = next;
+    if (currentDrive.value) {
+      currentIsBackup.value = next.has(currentDrive.value.toUpperCase());
+    }
+  } catch {
+    /* ignore */
+  }
 }
 
 async function refreshBatches() {
@@ -78,6 +138,21 @@ async function refreshBatches() {
   }
 }
 
+async function refreshControlled() {
+  controlledFiles.value = [];
+  selectedControlled.value = new Set();
+  controlledVerify.value = null;
+  if (!currentDrive.value || !currentIsBackup.value) return;
+  try {
+    controlledFiles.value = await invoke<ControlledFile[]>("list_controlled_files", {
+      drive: currentDrive.value,
+    });
+  } catch (e) {
+    // not a backup disk or empty
+    controlledFiles.value = [];
+  }
+}
+
 async function loadDir(path: string) {
   errorMsg.value = "";
   busy.value = true;
@@ -85,6 +160,15 @@ async function loadDir(path: string) {
     entries.value = await invoke<DirEntryInfo[]>("list_dir", { path });
     currentPath.value = path;
     selected.value = new Set();
+    await refreshBackupDrives();
+    if (!path) {
+      currentIsBackup.value = false;
+      controlledFiles.value = [];
+    } else {
+      const drive = path.match(/^([A-Za-z]:)/)?.[1]?.toUpperCase() + "\\";
+      currentIsBackup.value = !!drive && backupDriveSet.value.has(drive);
+      await refreshControlled();
+    }
   } catch (e) {
     errorMsg.value = String(e);
   } finally {
@@ -131,6 +215,109 @@ async function openEntry(e: DirEntryInfo) {
 
 function useCurrentAsDest() {
   if (currentPath.value) destPath.value = currentPath.value;
+}
+
+async function doMarkBackupDisk() {
+  errorMsg.value = "";
+  statusMsg.value = "";
+  // Prefer current drive; at root, use single selected drive
+  let target = currentDrive.value;
+  if (!currentPath.value) {
+    if (selected.value.size !== 1) {
+      errorMsg.value = "请在盘符列表中勾选一个盘，或先进入该盘";
+      return;
+    }
+    target = Array.from(selected.value)[0];
+  }
+  if (!target) {
+    errorMsg.value = "请先进入要标记的盘符";
+    return;
+  }
+  busy.value = true;
+  statusMsg.value = "正在标记备份盘…";
+  try {
+    await invoke("mark_backup_disk", { drive: target });
+    statusMsg.value = `已标记备份盘：${target}`;
+    await refreshBackupDrives();
+    currentIsBackup.value = true;
+    await refreshControlled();
+    if (!currentPath.value) await loadDir("");
+  } catch (e) {
+    errorMsg.value = String(e);
+    statusMsg.value = "";
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function doAddControlled() {
+  errorMsg.value = "";
+  statusMsg.value = "";
+  if (!currentIsBackup.value || !currentDrive.value) {
+    errorMsg.value = "请先将当前盘标记为备份盘";
+    return;
+  }
+  if (selected.value.size === 0) {
+    errorMsg.value = "请勾选要登记的文件或目录";
+    return;
+  }
+  // Ensure selections are on the same drive
+  const drive = currentDrive.value.toUpperCase();
+  for (const p of selected.value) {
+    if (!p.toUpperCase().startsWith(drive.replace(/\\$/, ""))) {
+      errorMsg.value = "受控文件必须位于当前备份盘上";
+      return;
+    }
+  }
+  busy.value = true;
+  statusMsg.value = "正在计算 MD5 / FastMD5 并登记…";
+  try {
+    const rows = await invoke<ControlledFile[]>("add_controlled_files", {
+      drive: currentDrive.value,
+      paths: Array.from(selected.value),
+    });
+    statusMsg.value = `已登记受控文件 ${rows.length} 个`;
+    await refreshControlled();
+  } catch (e) {
+    errorMsg.value = String(e);
+    statusMsg.value = "";
+  } finally {
+    busy.value = false;
+  }
+}
+
+function toggleControlled(rel: string) {
+  const next = new Set(selectedControlled.value);
+  if (next.has(rel)) next.delete(rel);
+  else next.add(rel);
+  selectedControlled.value = next;
+}
+
+async function doVerifyControlled(mode: "full" | "quick") {
+  errorMsg.value = "";
+  statusMsg.value = "";
+  if (!currentIsBackup.value || !currentDrive.value) {
+    errorMsg.value = "当前不是备份盘";
+    return;
+  }
+  busy.value = true;
+  statusMsg.value = mode === "full" ? "完整校验进行中…" : "快速校验（FastMD5）进行中…";
+  try {
+    const relPaths =
+      selectedControlled.value.size > 0 ? Array.from(selectedControlled.value) : null;
+    const cmd = mode === "full" ? "verify_controlled_full" : "verify_controlled_quick";
+    controlledVerify.value = await invoke<ControlledVerifyReport>(cmd, {
+      drive: currentDrive.value,
+      relPaths,
+    });
+    const r = controlledVerify.value;
+    statusMsg.value = `${mode === "full" ? "完整" : "快速"}校验完成：通过 ${r.passed}，失败 ${r.failed}，缺失 ${r.missing}，错误 ${r.errors}`;
+  } catch (e) {
+    errorMsg.value = String(e);
+    statusMsg.value = "";
+  } finally {
+    busy.value = false;
+  }
 }
 
 async function doBackup() {
@@ -199,7 +386,10 @@ onMounted(async () => {
     <header class="header">
       <div>
         <h1>数据管理 <span class="sub">DataVault</span></h1>
-        <p class="hint">资源管理器浏览 · 备份到目标盘 · 完整 / 快速 MD5 校验</p>
+        <p class="hint">
+          备份盘 · 受控文件 · 完整 MD5 / FastMD5 校验
+          <span v-if="currentIsBackup" class="badge backup">备份盘 {{ currentDrive }}</span>
+        </p>
       </div>
       <div class="header-actions">
         <button class="btn ghost" :disabled="busy" @click="goRoot">盘符</button>
@@ -221,6 +411,16 @@ onMounted(async () => {
           <button class="btn small" @click="selectAllFiles">全选</button>
           <button class="btn small" @click="selected = new Set()">清空选择</button>
           <button class="btn small" @click="useCurrentAsDest">将当前目录设为目标</button>
+          <button class="btn small primary-outline" :disabled="busy" @click="doMarkBackupDisk">
+            标记为备份盘
+          </button>
+          <button
+            class="btn small primary-outline"
+            :disabled="busy || !currentIsBackup"
+            @click="doAddControlled"
+          >
+            添加受控文件
+          </button>
           <span class="muted">已选 {{ selected.size }} 项</span>
         </div>
         <div class="table-wrap">
@@ -231,6 +431,7 @@ onMounted(async () => {
                 <th>名称</th>
                 <th style="width: 80px">类型</th>
                 <th style="width: 100px">大小</th>
+                <th style="width: 90px">标记</th>
               </tr>
             </thead>
             <tbody>
@@ -253,9 +454,12 @@ onMounted(async () => {
                 </td>
                 <td>{{ e.is_dir ? "文件夹" : "文件" }}</td>
                 <td>{{ e.is_dir ? "—" : formatSize(e.size) }}</td>
+                <td>
+                  <span v-if="e.is_backup_disk" class="badge backup">备份盘</span>
+                </td>
               </tr>
               <tr v-if="!entries.length">
-                <td colspan="4" class="muted center">空目录或无法访问</td>
+                <td colspan="5" class="muted center">空目录或无法访问</td>
               </tr>
             </tbody>
           </table>
@@ -264,7 +468,68 @@ onMounted(async () => {
 
       <aside class="side">
         <section class="panel">
-          <h2>备份</h2>
+          <h2>受控文件 <span v-if="currentIsBackup" class="badge backup">备份盘</span></h2>
+          <p v-if="!currentIsBackup" class="muted small">
+            进入盘符后点击「标记为备份盘」，再勾选文件「添加受控文件」。
+          </p>
+          <template v-else>
+            <p class="muted small">
+              清单随盘保存在 {{ currentDrive }}.datavault\vault.db；完整 = 全文件 MD5；快速 =
+              FastMD5（每 100MB 取前 10%）
+            </p>
+            <div class="row">
+              <button class="btn primary" :disabled="busy" @click="doVerifyControlled('full')">
+                完整校验
+              </button>
+              <button class="btn" :disabled="busy" @click="doVerifyControlled('quick')">
+                快速校验
+              </button>
+            </div>
+            <ul class="result-list controlled">
+              <li v-for="f in controlledFiles" :key="f.rel_path">
+                <label class="ctrl-row">
+                  <input
+                    type="checkbox"
+                    :checked="selectedControlled.has(f.rel_path)"
+                    @change="toggleControlled(f.rel_path)"
+                  />
+                  <div>
+                    <div class="rel">{{ f.rel_path }}</div>
+                    <div class="hash">MD5 {{ f.md5 }}</div>
+                    <div class="hash">Fast {{ f.fast_md5 }}</div>
+                  </div>
+                </label>
+              </li>
+              <li v-if="!controlledFiles.length" class="muted center">暂无受控文件</li>
+            </ul>
+            <div v-if="controlledVerify" class="verify-summary">
+              <p>
+                {{ controlledVerify.mode === "full" ? "完整" : "快速" }}： 通过
+                <strong class="pass">{{ controlledVerify.passed }}</strong> / 失败
+                <strong class="fail">{{ controlledVerify.failed }}</strong> / 缺失
+                {{ controlledVerify.missing }} / 错误 {{ controlledVerify.errors }}
+              </p>
+              <ul class="result-list">
+                <li
+                  v-for="(it, i) in controlledVerify.items"
+                  :key="i"
+                  :class="{
+                    ok: it.status === 'pass',
+                    bad: it.status !== 'pass',
+                  }"
+                >
+                  <div class="rel">{{ it.rel_path }}</div>
+                  <div class="msg">{{ it.status }} — {{ it.message }}</div>
+                  <div v-if="it.expected" class="hash">期望 {{ it.expected }}</div>
+                  <div v-if="it.actual" class="hash">实际 {{ it.actual }}</div>
+                </li>
+              </ul>
+            </div>
+          </template>
+        </section>
+
+        <section class="panel">
+          <h2>备份（批次）</h2>
           <label class="field">
             <span>目标目录</span>
             <input v-model="destPath" type="text" placeholder="例如 E:\Backup\DataVault" />
@@ -276,7 +541,7 @@ onMounted(async () => {
         </section>
 
         <section class="panel">
-          <h2>校验</h2>
+          <h2>批次校验</h2>
           <label class="field">
             <span>备份批次</span>
             <select v-model="verifyBatchId">
@@ -288,26 +553,24 @@ onMounted(async () => {
             <button class="btn primary" :disabled="busy" @click="doVerify('full')">完整校验</button>
             <button class="btn" :disabled="busy" @click="doVerify('quick')">快速校验</button>
           </div>
-          <p class="muted small">
-            完整 = 整文件 MD5；快速 = 头/尾各 64KB + 文件大小
-          </p>
+          <p class="muted small">批次快速校验仍为头/尾 64KB（旧路径）；受控文件请用上方 FastMD5。</p>
         </section>
 
         <section v-if="verifyReport" class="panel results">
           <h2>
-            校验结果
+            批次校验结果
             <span class="badge">{{ verifyReport.mode === "full" ? "完整" : "快速" }}</span>
           </h2>
           <p>
-            通过 <strong class="pass">{{ verifyReport.passed }}</strong> /
-            失败 <strong class="fail">{{ verifyReport.failed }}</strong>
+            通过 <strong class="pass">{{ verifyReport.passed }}</strong> / 失败
+            <strong class="fail">{{ verifyReport.failed }}</strong>
           </p>
           <ul class="result-list">
             <li v-for="(it, i) in verifyReport.items" :key="i" :class="{ ok: it.ok, bad: !it.ok }">
               <div class="rel">{{ it.rel_path }}</div>
               <div class="msg">{{ it.message }}</div>
               <div v-if="it.src_hash" class="hash">源 {{ it.src_hash }}</div>
-              <div v-if="it.dest_hash" class="hash">备 {{ it.dest_hash }}</div>
+              <div v-if="it.dest_hash" class="hash">目标 {{ it.dest_hash }}</div>
             </li>
           </ul>
         </section>
@@ -369,7 +632,7 @@ h1 {
 }
 .layout {
   display: grid;
-  grid-template-columns: 1fr 340px;
+  grid-template-columns: 1fr 360px;
   gap: 14px;
   min-height: calc(100vh - 120px);
 }
@@ -453,6 +716,8 @@ tr:hover {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  max-height: calc(100vh - 120px);
+  overflow: auto;
 }
 h2 {
   margin: 0 0 10px;
@@ -494,6 +759,10 @@ select {
   width: 100%;
   font-weight: 600;
 }
+.btn.primary-outline {
+  border-color: #2f5bff;
+  color: #9db4ff;
+}
 .btn.ghost {
   background: transparent;
 }
@@ -507,6 +776,7 @@ select {
 }
 .row .btn {
   flex: 1;
+  width: auto;
 }
 .muted {
   color: #9aa7b8;
@@ -524,6 +794,9 @@ select {
   border-radius: 999px;
   margin-left: 6px;
 }
+.badge.backup {
+  background: #1f6b45;
+}
 .pass {
   color: #6dffa0;
 }
@@ -534,8 +807,11 @@ select {
   list-style: none;
   padding: 0;
   margin: 8px 0 0;
-  max-height: 280px;
+  max-height: 220px;
   overflow: auto;
+}
+.result-list.controlled {
+  max-height: 180px;
 }
 .result-list li {
   padding: 8px;
@@ -552,6 +828,12 @@ select {
   border-color: #7a2e2e;
   background: #201212;
 }
+.ctrl-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  cursor: pointer;
+}
 .rel {
   font-weight: 600;
 }
@@ -559,6 +841,9 @@ select {
   font-family: ui-monospace, Consolas, monospace;
   color: #9aa7b8;
   word-break: break-all;
+}
+.verify-summary {
+  margin-top: 8px;
 }
 @media (max-width: 960px) {
   .layout {
