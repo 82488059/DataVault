@@ -1,20 +1,24 @@
-//! Background indexing jobs for controlled files (avoids UI freeze).
+﻿//! Background jobs (index/add/backup/verify) — multiple can run in parallel; each has its own cancel flag.
 
 use crate::disk;
 use crate::vault::{self, ControlledFile};
 use serde::Serialize;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
 
-static CANCEL: AtomicBool = AtomicBool::new(false);
-static JOB_RUNNING: AtomicBool = AtomicBool::new(false);
-static LAST_JOB: Mutex<Option<String>> = Mutex::new(None);
-
 pub const EVT_PROGRESS: &str = "controlled-job-progress";
 pub const EVT_FINISHED: &str = "controlled-job-finished";
+
+struct JobSlot {
+    kind: String,
+    cancel: Arc<AtomicBool>,
+}
+
+static JOBS: LazyLock<Mutex<HashMap<String, JobSlot>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Debug, Clone, Serialize)]
 pub struct JobStart {
@@ -47,26 +51,65 @@ pub struct JobFinished {
     pub files: Vec<ControlledFile>,
 }
 
-fn new_job_id() -> String {
+fn new_job_id(prefix: &str) -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    format!("job-{nanos}")
+    format!("{prefix}-{nanos}")
 }
 
-pub fn cancel_job() -> bool {
-    if JOB_RUNNING.load(Ordering::SeqCst) {
-        CANCEL.store(true, Ordering::SeqCst);
-        true
-    } else {
-        false
+/// Register a new job; returns (job_id, cancel flag). Caller must `finish_job` when done.
+pub fn register_job(kind: &str) -> (String, Arc<AtomicBool>) {
+    let job_id = new_job_id(kind);
+    let cancel = Arc::new(AtomicBool::new(false));
+    if let Ok(mut g) = JOBS.lock() {
+        g.insert(
+            job_id.clone(),
+            JobSlot {
+                kind: kind.to_string(),
+                cancel: cancel.clone(),
+            },
+        );
+    }
+    (job_id, cancel)
+}
+
+pub fn finish_job(job_id: &str) {
+    if let Ok(mut g) = JOBS.lock() {
+        g.remove(job_id);
     }
 }
 
-pub fn is_running() -> bool {
-    JOB_RUNNING.load(Ordering::SeqCst)
+/// Cancel one job by id. Returns true if found and marked.
+pub fn cancel_job_id(job_id: &str) -> bool {
+    if let Ok(g) = JOBS.lock() {
+        if let Some(slot) = g.get(job_id) {
+            slot.cancel.store(true, Ordering::SeqCst);
+            return true;
+        }
+    }
+    false
 }
+
+/// Cancel all jobs whose kind matches any of the given prefixes (e.g. "add", "index").
+pub fn cancel_kinds(prefixes: &[&str]) -> bool {
+    let mut any = false;
+    if let Ok(g) = JOBS.lock() {
+        for slot in g.values() {
+            if prefixes.iter().any(|p| slot.kind == *p || slot.kind.starts_with(p)) {
+                slot.cancel.store(true, Ordering::SeqCst);
+                any = true;
+            }
+        }
+    }
+    any
+}
+
+pub fn is_cancelled(flag: &AtomicBool) -> bool {
+    flag.load(Ordering::SeqCst)
+}
+
 
 fn emit_progress(app: &AppHandle, p: JobProgress) {
     let _ = app.emit(EVT_PROGRESS, p);
@@ -76,30 +119,14 @@ fn emit_finished(app: &AppHandle, f: JobFinished) {
     let _ = app.emit(EVT_FINISHED, f);
 }
 
-fn try_claim_job() -> Result<(), String> {
-    if JOB_RUNNING
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
-    {
-        return Err("已有索引/登记任务在进行中，请先等待或取消".into());
-    }
-    CANCEL.store(false, Ordering::SeqCst);
-    Ok(())
-}
-
-fn finish_claim() {
-    JOB_RUNNING.store(false, Ordering::SeqCst);
-    CANCEL.store(false, Ordering::SeqCst);
-}
-
 fn run_hash_job(
     app: &AppHandle,
     drive_root: &PathBuf,
     files: Vec<PathBuf>,
     job_id: &str,
     kind: &str,
+    cancel: &AtomicBool,
 ) {
-    // Skip files already in vault.db — do not re-hash.
     let existing: std::collections::HashSet<String> = vault::list_controlled_files(drive_root)
         .unwrap_or_default()
         .into_iter()
@@ -131,14 +158,12 @@ fn run_hash_job(
             current: 0,
             total,
             rel_path: None,
-            message: format!(
-                "开始计算哈希：待处理 {total} 个，跳过已受控 {skipped} 个"
-            ),
+            message: format!("开始计算哈希：待处理 {total} 个，跳过已受控 {skipped} 个"),
         },
     );
 
     for (i, abs) in to_hash.iter().enumerate() {
-        if CANCEL.load(Ordering::SeqCst) {
+        if is_cancelled(cancel) {
             cancelled = true;
             break;
         }
@@ -207,7 +232,7 @@ fn run_hash_job(
         },
     );
 
-    finish_claim();
+    finish_job(job_id);
 }
 
 /// Expand selected paths (files/dirs) and hash in a background thread.
@@ -220,14 +245,9 @@ pub fn start_add_controlled(
     if !disk::is_backup_disk(&root) {
         return Err("当前盘不是 DataVault 备份盘，请先标记".into());
     }
-    try_claim_job()?;
-
-    let job_id = new_job_id();
-    if let Ok(mut g) = LAST_JOB.lock() {
-        *g = Some(job_id.clone());
-    }
-    let paths = paths.to_vec();
+    let (job_id, cancel) = register_job("add");
     let job_id_ret = job_id.clone();
+    let paths = paths.to_vec();
 
     std::thread::Builder::new()
         .name("datavault-index".into())
@@ -261,14 +281,14 @@ pub fn start_add_controlled(
                             files: vec![],
                         },
                     );
-                    finish_claim();
+                    finish_job(&job_id);
                     return;
                 }
             };
-            run_hash_job(&app, &root, files, &job_id, "add");
+            run_hash_job(&app, &root, files, &job_id, "add", &cancel);
         })
         .map_err(|e| {
-            finish_claim();
+            finish_job(&job_id_ret);
             format!("无法启动后台任务: {e}")
         })?;
 
@@ -285,12 +305,7 @@ pub fn start_index_disk(app: AppHandle, drive: &str) -> Result<JobStart, String>
     if !disk::is_backup_disk(&root) {
         return Err("当前盘不是 DataVault 备份盘，请先标记".into());
     }
-    try_claim_job()?;
-
-    let job_id = new_job_id();
-    if let Ok(mut g) = LAST_JOB.lock() {
-        *g = Some(job_id.clone());
-    }
+    let (job_id, cancel) = register_job("index");
     let job_id_ret = job_id.clone();
 
     std::thread::Builder::new()
@@ -307,7 +322,7 @@ pub fn start_index_disk(app: AppHandle, drive: &str) -> Result<JobStart, String>
                     message: format!("正在扫描 {} …", root.display()),
                 },
             );
-            if CANCEL.load(Ordering::SeqCst) {
+            if is_cancelled(&cancel) {
                 emit_finished(
                     &app,
                     JobFinished {
@@ -316,14 +331,14 @@ pub fn start_index_disk(app: AppHandle, drive: &str) -> Result<JobStart, String>
                         ok: false,
                         cancelled: true,
                         added: 0,
-                            skipped: 0,
+                        skipped: 0,
                         failed: 0,
                         total: 0,
                         message: "已取消".into(),
                         files: vec![],
                     },
                 );
-                finish_claim();
+                finish_job(&job_id);
                 return;
             }
             let mut files = Vec::new();
@@ -336,20 +351,20 @@ pub fn start_index_disk(app: AppHandle, drive: &str) -> Result<JobStart, String>
                         ok: false,
                         cancelled: false,
                         added: 0,
-                            skipped: 0,
+                        skipped: 0,
                         failed: 0,
                         total: 0,
                         message: e,
                         files: vec![],
                     },
                 );
-                finish_claim();
+                finish_job(&job_id);
                 return;
             }
-            run_hash_job(&app, &root, files, &job_id, "index");
+            run_hash_job(&app, &root, files, &job_id, "index", &cancel);
         })
         .map_err(|e| {
-            finish_claim();
+            finish_job(&job_id_ret);
             format!("无法启动后台任务: {e}")
         })?;
 
@@ -358,4 +373,17 @@ pub fn start_index_disk(app: AppHandle, drive: &str) -> Result<JobStart, String>
         total: 0,
         kind: "index".into(),
     })
+}
+
+/// Legacy: cancel all add/index jobs.
+pub fn cancel_job() -> bool {
+    cancel_kinds(&["add", "index"])
+}
+
+pub fn is_running() -> bool {
+    if let Ok(g) = JOBS.lock() {
+        g.values().any(|s| s.kind == "add" || s.kind == "index")
+    } else {
+        false
+    }
 }

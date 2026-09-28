@@ -49,14 +49,24 @@ interface VerifyJobFinished {
 }
 interface JobStart { job_id: string; total: number; kind: string; }
 
+interface ActiveJob {
+  job_id: string;
+  kind: string;
+  label: string;
+  phase: string;
+  current: number;
+  total: number;
+  rel_path: string | null;
+  message: string;
+}
+
 const currentPath = ref("");
 const entries = ref<DirEntryInfo[]>([]);
 const selected = ref<Set<string>>(new Set());
 const errorMsg = ref("");
 const statusMsg = ref("");
 const busy = ref(false);
-const jobRunning = ref(false);
-const jobProgress = ref<JobProgress | null>(null);
+const activeJobs = ref<ActiveJob[]>([]);
 
 const destPath = ref("");
 const sources = ref<string[]>([]);
@@ -77,6 +87,48 @@ const currentDrive = computed(() => {
   return m ? m[1].toUpperCase() + "\\" : "";
 });
 const hasSelection = computed(() => selected.value.size > 0);
+const hasJobs = computed(() => activeJobs.value.length > 0);
+
+function kindLabel(kind: string): string {
+  switch (kind) {
+    case "backup": return "备份";
+    case "add": return "登记受控";
+    case "index": return "建立索引";
+    case "controlled-full": return "受控完整校验";
+    case "controlled-quick": return "受控快速校验";
+    case "batch": return "批次校验";
+    default: return kind || "任务";
+  }
+}
+
+function upsertJob(partial: Partial<ActiveJob> & { job_id: string; kind?: string }) {
+  const list = [...activeJobs.value];
+  const i = list.findIndex((j) => j.job_id === partial.job_id);
+  if (i >= 0) {
+    list[i] = { ...list[i], ...partial };
+  } else {
+    list.push({
+      job_id: partial.job_id,
+      kind: partial.kind || "task",
+      label: kindLabel(partial.kind || "task"),
+      phase: partial.phase || "running",
+      current: partial.current ?? 0,
+      total: partial.total ?? 0,
+      rel_path: partial.rel_path ?? null,
+      message: partial.message || "",
+    });
+  }
+  activeJobs.value = list;
+}
+
+function removeJob(jobId: string) {
+  activeJobs.value = activeJobs.value.filter((j) => j.job_id !== jobId);
+}
+
+function progressPct(j: ActiveJob): string {
+  if (!j.total) return "15%";
+  return Math.min(100, (100 * j.current) / j.total) + "%";
+}
 
 /** Drive for indexing: current backup path, or one selected backup drive root at 盘符 list. */
 function resolveIndexDrive(): string {
@@ -102,6 +154,16 @@ function formatSize(n: number): string {
 
 function isDriveRootPath(p: string): boolean {
   return /^[A-Za-z]:[\\/]?$/.test((p || "").trim());
+}
+
+async function copyCurrentPath() {
+  const text = currentPath.value || "";
+  try {
+    await navigator.clipboard.writeText(text);
+    statusMsg.value = text ? `已复制路径：${text}` : "当前在盘符列表（空路径）";
+  } catch {
+    errorMsg.value = "复制路径失败";
+  }
 }
 
 async function refreshBackupDrives() {
@@ -186,6 +248,10 @@ async function doMarkBackupDisk() {
   } else {
     errorMsg.value = "只能在盘符根目录标记备份盘（请返回盘符列表或进入 X:\\ 后再标记）"; return;
   }
+  const ok = window.confirm(
+    `确认将「${target}」标记为 DataVault 备份盘？\n\n将在该盘根目录创建 .datavault 元数据目录。`
+  );
+  if (!ok) { statusMsg.value = "已取消标记"; return; }
   busy.value = true; statusMsg.value = "正在标记备份盘…";
   try {
     await invoke("mark_backup_disk", { drive: target });
@@ -201,13 +267,12 @@ async function doBackup() {
   const src = sources.value.length ? sources.value : Array.from(selected.value);
   if (!src.length) { errorMsg.value = "请先勾选或「设为备份源」"; return; }
   if (!destPath.value.trim()) { errorMsg.value = "请填写备份目标目录"; return; }
-  if (jobRunning.value) { errorMsg.value = "已有任务在进行中"; return; }
   try {
-    jobRunning.value = true; jobProgress.value = null;
     statusMsg.value = "已启动后台备份…";
     const start = await invoke<JobStart>("start_backup", { sources: src, dest: destPath.value.trim() });
-    statusMsg.value = `备份任务 ${start.job_id} 已开始`;
-  } catch (e) { jobRunning.value = false; errorMsg.value = String(e); statusMsg.value = ""; }
+    upsertJob({ job_id: start.job_id, kind: start.kind, phase: "copying", message: "开始备份…" });
+    statusMsg.value = `备份任务 ${start.job_id} 已开始（可与其它任务并行）`;
+  } catch (e) { errorMsg.value = String(e); statusMsg.value = ""; }
 }
 
 async function doAddControlled() {
@@ -216,15 +281,14 @@ async function doAddControlled() {
     errorMsg.value = "请先在备份盘目录下操作（或标记备份盘）"; return;
   }
   if (selected.value.size === 0) { errorMsg.value = "请先勾选要登记的文件或目录"; return; }
-  if (jobRunning.value) { errorMsg.value = "已有任务在进行中"; return; }
   try {
-    jobRunning.value = true; jobProgress.value = null;
     statusMsg.value = "已启动后台登记（MD5 / FastMD5）…";
     const start = await invoke<JobStart>("start_add_controlled_files", {
       drive: currentDrive.value, paths: Array.from(selected.value),
     });
-    statusMsg.value = `登记任务 ${start.job_id} 已开始`;
-  } catch (e) { jobRunning.value = false; errorMsg.value = String(e); statusMsg.value = ""; }
+    upsertJob({ job_id: start.job_id, kind: start.kind, phase: "scanning", message: "正在收集文件列表…" });
+    statusMsg.value = `登记任务 ${start.job_id} 已开始（可与其它任务并行）`;
+  } catch (e) { errorMsg.value = String(e); statusMsg.value = ""; }
 }
 
 async function doIndex() {
@@ -233,22 +297,19 @@ async function doIndex() {
   if (!drive) {
     errorMsg.value = "请先进入已标记的备份盘，或在盘符列表勾选一个备份盘"; return;
   }
-  if (jobRunning.value) { errorMsg.value = "已有任务在进行中"; return; }
   try {
-    jobRunning.value = true; jobProgress.value = null;
     statusMsg.value = "正在扫描备份盘并建立索引…";
     const start = await invoke<JobStart>("start_index_backup_disk", { drive });
-    statusMsg.value = `索引任务 ${start.job_id} 已开始`;
-  } catch (e) { jobRunning.value = false; errorMsg.value = String(e); statusMsg.value = ""; }
+    upsertJob({ job_id: start.job_id, kind: start.kind, phase: "scanning", message: "正在扫描…" });
+    statusMsg.value = `索引任务 ${start.job_id} 已开始（可与其它任务并行）`;
+  } catch (e) { errorMsg.value = String(e); statusMsg.value = ""; }
 }
 
 /** Verify controlled files: use current browse selection as paths filter; none → all. */
 async function doVerifyControlled(mode: "full" | "quick") {
   errorMsg.value = ""; statusMsg.value = "";
   if (!currentIsBackup.value || !currentDrive.value) { errorMsg.value = "当前没有备份盘上下文"; return; }
-  if (jobRunning.value) { errorMsg.value = "已有任务在进行中"; return; }
   try {
-    jobRunning.value = true; jobProgress.value = null;
     controlledVerify.value = null; verifyReport.value = null;
     const sel = Array.from(selected.value);
     statusMsg.value = mode === "full"
@@ -260,31 +321,29 @@ async function doVerifyControlled(mode: "full" | "quick") {
       relPaths: null,
       paths: sel.length ? sel : null,
     });
-    statusMsg.value = `校验任务 ${start.job_id} 已开始`;
-  } catch (e) { jobRunning.value = false; errorMsg.value = String(e); statusMsg.value = ""; }
+    upsertJob({ job_id: start.job_id, kind: start.kind, phase: "verifying", message: "正在校验…" });
+    statusMsg.value = `校验任务 ${start.job_id} 已开始（可与其它任务并行）`;
+  } catch (e) { errorMsg.value = String(e); statusMsg.value = ""; }
 }
 
 async function doVerifyBatch(mode: "full" | "quick") {
   errorMsg.value = ""; statusMsg.value = "";
   if (!verifyBatchId.value) { errorMsg.value = "请选择要校验的批次"; return; }
-  if (jobRunning.value) { errorMsg.value = "已有任务在进行中"; return; }
   try {
-    jobRunning.value = true; jobProgress.value = null;
     controlledVerify.value = null; verifyReport.value = null;
     statusMsg.value = mode === "full" ? "批次完整校验进行中…" : "批次快速校验进行中…";
     const start = await invoke<JobStart>("start_verify_backup", {
       batchId: verifyBatchId.value, mode,
     });
-    statusMsg.value = `批次校验 ${start.job_id} 已开始`;
-  } catch (e) { jobRunning.value = false; errorMsg.value = String(e); statusMsg.value = ""; }
+    upsertJob({ job_id: start.job_id, kind: start.kind, phase: "verifying", message: "正在校验批次…" });
+    statusMsg.value = `批次校验 ${start.job_id} 已开始（可与其它任务并行）`;
+  } catch (e) { errorMsg.value = String(e); statusMsg.value = ""; }
 }
 
-async function doCancel() {
+async function doCancelJob(jobId: string) {
   try {
-    await invoke<boolean>("cancel_controlled_job").catch(() => false);
-    await invoke<boolean>("cancel_backup_job").catch(() => false);
-    await invoke<boolean>("cancel_verify_job").catch(() => false);
-    statusMsg.value = "正在取消…";
+    const ok = await invoke<boolean>("cancel_job", { jobId });
+    statusMsg.value = ok ? `正在取消任务 ${jobId}…` : `未找到任务 ${jobId}`;
   } catch (e) { errorMsg.value = String(e); }
 }
 
@@ -293,26 +352,54 @@ onMounted(async () => {
   await refreshBatches();
   const bind = async (ev: string, fn: (p: any) => void) => listen(ev, (e) => fn(e.payload));
   const u1 = await bind("controlled-job-progress", (p: JobProgress) => {
-    jobProgress.value = p; jobRunning.value = true; statusMsg.value = p.message;
+    upsertJob({
+      job_id: p.job_id,
+      phase: p.phase,
+      current: p.current,
+      total: p.total,
+      rel_path: p.rel_path,
+      message: p.message,
+    });
+    statusMsg.value = p.message;
   });
   const u2 = await bind("controlled-job-finished", (p: JobFinished) => {
-    jobRunning.value = false; jobProgress.value = null; statusMsg.value = p.message;
+    removeJob(p.job_id);
+    statusMsg.value = p.message;
     if (!p.ok && !p.cancelled) errorMsg.value = p.message;
   });
   const u3 = await bind("backup-job-progress", (p: JobProgress) => {
-    jobProgress.value = p; jobRunning.value = true; statusMsg.value = p.message;
+    upsertJob({
+      job_id: p.job_id,
+      kind: "backup",
+      phase: p.phase,
+      current: p.current,
+      total: p.total,
+      rel_path: p.rel_path,
+      message: p.message,
+    });
+    statusMsg.value = p.message;
   });
   const u4 = await bind("backup-job-finished", (p: BackupJobFinished) => {
-    jobRunning.value = false; jobProgress.value = null; statusMsg.value = p.message;
+    removeJob(p.job_id);
+    statusMsg.value = p.message;
     if (p.batch) { lastBatch.value = p.batch; verifyBatchId.value = p.batch.id; }
     if (!p.ok && !p.cancelled) errorMsg.value = p.message;
     void refreshBatches();
   });
   const u5 = await bind("verify-job-progress", (p: JobProgress) => {
-    jobProgress.value = p; jobRunning.value = true; statusMsg.value = p.message;
+    upsertJob({
+      job_id: p.job_id,
+      phase: p.phase,
+      current: p.current,
+      total: p.total,
+      rel_path: p.rel_path,
+      message: p.message,
+    });
+    statusMsg.value = p.message;
   });
   const u6 = await bind("verify-job-finished", (p: VerifyJobFinished) => {
-    jobRunning.value = false; jobProgress.value = null; statusMsg.value = p.message;
+    removeJob(p.job_id);
+    statusMsg.value = p.message;
     if (p.controlled) controlledVerify.value = p.controlled;
     if (p.batch) verifyReport.value = p.batch;
     if (!p.ok && !p.cancelled) errorMsg.value = p.message;
@@ -327,7 +414,7 @@ onUnmounted(() => { for (const u of unlisteners) u(); unlisteners = []; });
     <header class="header">
       <div>
         <h1>数据管理 <span class="sub">DataVault</span></h1>
-        <p class="hint">浏览 · 备份 · 受控/索引 · 校验
+        <p class="hint">浏览 · 校验 · 备份 · 受控/索引
           <span v-if="currentIsBackup" class="badge backup">备份盘 {{ currentDrive }}</span>
         </p>
       </div>
@@ -335,19 +422,21 @@ onUnmounted(() => { for (const u of unlisteners) u(); unlisteners = []; });
 
     <div v-if="errorMsg" class="banner error">{{ errorMsg }}</div>
     <div v-if="statusMsg" class="banner ok">{{ statusMsg }}</div>
-    <div v-if="jobRunning" class="banner progress">
-      <div class="progress-row">
+    <div v-if="hasJobs" class="banner progress jobs-panel">
+      <div class="jobs-title">进行中的任务（{{ activeJobs.length }}）— 可并行，各自取消</div>
+      <div v-for="j in activeJobs" :key="j.job_id" class="progress-row">
         <div class="progress-main">
           <div class="progress-meta">
-            <span>{{ jobProgress ? jobProgress.phase : "任务进行中…" }}</span>
-            <span v-if="jobProgress && jobProgress.total">{{ jobProgress.current }} / {{ jobProgress.total }}</span>
+            <span><strong>{{ j.label }}</strong> · {{ j.phase }} <span class="job-id">{{ j.job_id }}</span></span>
+            <span v-if="j.total">{{ j.current }} / {{ j.total }}</span>
           </div>
           <div class="progress-track">
-            <div class="progress-fill" :style="{ width: jobProgress && jobProgress.total ? Math.min(100, (100 * jobProgress.current) / jobProgress.total) + '%' : '15%' }"></div>
+            <div class="progress-fill" :style="{ width: progressPct(j) }"></div>
           </div>
-          <div v-if="jobProgress && jobProgress.rel_path" class="progress-file">{{ jobProgress.rel_path }}</div>
+          <div v-if="j.message" class="progress-file">{{ j.message }}</div>
+          <div v-if="j.rel_path" class="progress-file">{{ j.rel_path }}</div>
         </div>
-        <button class="btn small" title="取消正在进行的后台任务" @click="doCancel">取消任务</button>
+        <button class="btn small" title="取消此任务" @click="doCancelJob(j.job_id)">取消</button>
       </div>
     </div>
 
@@ -357,13 +446,17 @@ onUnmounted(() => { for (const u of unlisteners) u(); unlisteners = []; });
           <button class="btn small" title="返回盘符列表" :disabled="busy" @click="goRoot">盘符</button>
           <button class="btn small" title="返回上一级" :disabled="busy || !currentPath" @click="goUp">上级</button>
           <button class="btn small" title="刷新当前目录" :disabled="busy" @click="loadDir(currentPath)">刷新</button>
-          <span class="pathbar-inline"><span class="label">当前位置</span><code>{{ pathLabel }}</code></span>
           <button class="btn small" title="全选当前列表" @click="selectAllFiles">全选</button>
           <button class="btn small" title="清空勾选" @click="clearSelection">清空选择</button>
           <button class="btn small primary-outline" title="将勾选设为备份源" @click="useSelectedAsSources">设为备份源</button>
           <button class="btn small primary-outline" title="将勾选的唯一目录或当前目录设为目标" @click="useCurrentAsDest">设为目标目录</button>
-          <button class="btn small primary-outline" title="仅可标记盘符根为备份盘" :disabled="busy" @click="doMarkBackupDisk">标记为备份盘</button>
+          <button class="btn small primary-outline" title="仅可标记盘符根为备份盘（需二次确认）" :disabled="busy" @click="doMarkBackupDisk">标记为备份盘</button>
           <span class="muted">已选 {{ selected.size }} 项</span>
+        </div>
+        <div class="pathbar" title="点击复制路径">
+          <span class="label">当前位置</span>
+          <code class="path-copy" tabindex="0" @click="copyCurrentPath" @keydown.enter.prevent="copyCurrentPath">{{ pathLabel }}</code>
+          <button class="btn small" type="button" title="复制路径" @click="copyCurrentPath">复制</button>
         </div>
         <div class="table-wrap">
           <table>
@@ -392,6 +485,25 @@ onUnmounted(() => { for (const u of unlisteners) u(); unlisteners = []; });
 
       <aside class="side">
         <section class="panel">
+          <h2>校验</h2>
+          <p class="muted small">直接使用当前勾选的目录/文件（仅其中已受控项）；未勾选则校验全部受控。可与备份/索引并行。</p>
+          <div class="row">
+            <button class="btn primary" title="按当前勾选（或全部）快速校验" :disabled="!currentIsBackup" @click="doVerifyControlled('quick')">快速校验</button>
+            <button class="btn" title="按当前勾选（或全部）完整校验" :disabled="!currentIsBackup" @click="doVerifyControlled('full')">完整校验</button>
+          </div>
+          <label class="field" style="margin-top:10px"><span>备份批次</span>
+            <select v-model="verifyBatchId">
+              <option disabled value="">请选择批次</option>
+              <option v-for="id in batchIds" :key="id" :value="id">{{ id }}</option>
+            </select>
+          </label>
+          <div class="row">
+            <button class="btn primary" title="对所选批次做快速校验" @click="doVerifyBatch('quick')">批次快速校验</button>
+            <button class="btn" title="对所选批次做完整校验" @click="doVerifyBatch('full')">批次完整校验</button>
+          </div>
+        </section>
+
+        <section class="panel">
           <h2>备份批次</h2>
           <p class="muted small">源（{{ sources.length }}）</p>
           <ul class="src-list">
@@ -402,37 +514,18 @@ onUnmounted(() => { for (const u of unlisteners) u(); unlisteners = []; });
           <label class="field"><span>目标目录</span>
             <input v-model="destPath" type="text" placeholder="例如 E:\Backup\DataVault" title="备份复制到此目录" />
           </label>
-          <button class="btn primary" title="开始将源复制到目标并写批次" :disabled="jobRunning" @click="doBackup">开始备份</button>
+          <button class="btn primary" title="开始将源复制到目标并写批次（可与其它任务并行）" @click="doBackup">开始备份</button>
           <p v-if="lastBatch" class="muted small">最近批次：<strong>{{ lastBatch.id }}</strong>（{{ lastBatch.files.length }} 个文件）</p>
         </section>
 
         <section class="panel">
           <h2>受控 / 索引</h2>
-          <p class="muted small">添加受控须先勾选文件/目录；建立索引在进入备份盘或勾选备份盘符后即可。已在 vault.db 中的跳过，不重算哈希。</p>
+          <p class="muted small">添加受控须先勾选文件/目录；建立索引在进入备份盘或勾选备份盘符后即可。已在 vault.db 中的跳过，不重算哈希。可与备份/校验并行。</p>
           <div class="row">
             <button class="btn primary-outline" title="将勾选路径登记为受控并计算 MD5/FastMD5（未勾选不可用）"
-              :disabled="jobRunning || !currentIsBackup || !hasSelection" @click="doAddControlled">添加受控文件</button>
+              :disabled="!currentIsBackup || !hasSelection" @click="doAddControlled">添加受控文件</button>
             <button class="btn primary-outline" title="进入备份盘或勾选备份盘符后即可扫描全盘并为未受控文件建索引"
-              :disabled="jobRunning || !canIndex" @click="doIndex">建立备份索引</button>
-          </div>
-        </section>
-
-        <section class="panel">
-          <h2>校验</h2>
-          <p class="muted small">直接使用当前勾选的目录/文件（仅其中已受控项）；未勾选则校验全部受控。</p>
-          <div class="row">
-            <button class="btn primary" title="按当前勾选（或全部）快速校验" :disabled="jobRunning || !currentIsBackup" @click="doVerifyControlled('quick')">快速校验</button>
-            <button class="btn" title="按当前勾选（或全部）完整校验" :disabled="jobRunning || !currentIsBackup" @click="doVerifyControlled('full')">完整校验</button>
-          </div>
-          <label class="field" style="margin-top:10px"><span>备份批次</span>
-            <select v-model="verifyBatchId">
-              <option disabled value="">请选择批次</option>
-              <option v-for="id in batchIds" :key="id" :value="id">{{ id }}</option>
-            </select>
-          </label>
-          <div class="row">
-            <button class="btn primary" title="对所选批次做快速校验" :disabled="jobRunning" @click="doVerifyBatch('quick')">批次快速校验</button>
-            <button class="btn" title="对所选批次做完整校验" :disabled="jobRunning" @click="doVerifyBatch('full')">批次完整校验</button>
+              :disabled="!canIndex" @click="doIndex">建立备份索引</button>
           </div>
         </section>
       </aside>
@@ -479,12 +572,14 @@ onUnmounted(() => { for (const u of unlisteners) u(); unlisteners = []; });
 h1 { margin:0; font-size:1.35rem; font-weight:700; }
 .sub { color:#7aa2ff; font-weight:500; font-size:0.95rem; }
 .hint { margin:4px 0 0; color:#9aa7b8; font-size:0.85rem; }
-.header-actions { display:flex; gap:8px; flex-wrap:wrap; }
 .banner { padding:8px 12px; border-radius:8px; font-size:0.88rem; }
 .banner.error { background:#3a1515; color:#ffb4b4; border:1px solid #7a2e2e; }
 .banner.ok { background:#14301f; color:#b6f0c8; border:1px solid #2d6a45; }
 .banner.progress { background:#152038; color:#c5d4ff; border:1px solid #2f5bff; }
-.progress-meta { display:flex; justify-content:space-between; font-size:0.85rem; margin-bottom:6px; }
+.jobs-panel { display:flex; flex-direction:column; gap:10px; }
+.jobs-title { font-size:0.82rem; color:#9db4ff; margin-bottom:2px; }
+.progress-meta { display:flex; justify-content:space-between; font-size:0.85rem; margin-bottom:6px; gap:8px; }
+.job-id { color:#7a8aa0; font-size:0.72rem; margin-left:6px; font-family:ui-monospace,Consolas,monospace; }
 .progress-track { height:8px; background:#0f1419; border-radius:999px; overflow:hidden; }
 .progress-fill { height:100%; background:linear-gradient(90deg,#2f5bff,#6d9bff); }
 .progress-file { margin-top:6px; font-size:0.78rem; color:#9aa7b8; word-break:break-all; }
@@ -492,9 +587,13 @@ h1 { margin:0; font-size:1.35rem; font-weight:700; }
 .side { display:flex; flex-direction:column; gap:10px; min-height:0; overflow:auto; }
 .panel { background:#171d25; border:1px solid #2a3442; border-radius:12px; padding:12px; }
 .explorer { display:flex; flex-direction:column; min-height:0; max-height:calc(100vh - 280px); }
-.pathbar { display:flex; align-items:center; gap:10px; margin-bottom:8px; }
-.pathbar .label { color:#9aa7b8; font-size:0.8rem; }
-.pathbar code { flex:1; background:#0f1419; padding:6px 10px; border-radius:6px; border:1px solid #2a3442; font-size:0.85rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.pathbar { display:flex; align-items:center; gap:10px; margin-bottom:8px; width:100%; }
+.pathbar .label { color:#9aa7b8; font-size:0.8rem; white-space:nowrap; }
+.pathbar code.path-copy {
+  flex:1; background:#0f1419; padding:8px 10px; border-radius:6px; border:1px solid #2a3442;
+  font-size:0.85rem; user-select:all; cursor:pointer; word-break:break-all; white-space:pre-wrap;
+}
+.pathbar code.path-copy:hover { border-color:#2f5bff; }
 .toolbar { display:flex; gap:8px; align-items:center; margin-bottom:8px; flex-wrap:wrap; }
 .table-wrap { flex:1; overflow:auto; border:1px solid #2a3442; border-radius:8px; min-height:180px; }
 table { width:100%; border-collapse:collapse; font-size:0.88rem; }
@@ -510,7 +609,6 @@ input[type="text"], select { background:#0f1419; border:1px solid #2a3442; color
 .btn:disabled { opacity:0.5; cursor:not-allowed; }
 .btn.primary { background:#2f5bff; border-color:#2f5bff; font-weight:600; width:100%; }
 .btn.primary-outline { border-color:#2f5bff; color:#9db4ff; background:transparent; width:100%; margin-top:6px; }
-.btn.ghost { background:transparent; }
 .btn.small { padding:4px 8px; font-size:0.78rem; width:auto; margin:0; }
 .btn.tiny { padding:0 6px; font-size:0.75rem; }
 .side .row .btn { width:auto; flex:1; margin:0; }
@@ -531,12 +629,6 @@ input[type="text"], select { background:#0f1419; border:1px solid #2a3442; color
 .rel { font-weight:600; } .hash { font-family:ui-monospace,Consolas,monospace; color:#9aa7b8; word-break:break-all; }
 .verify-summary { margin-top:8px; }
 @media (max-width:1000px) { .layout { grid-template-columns:1fr; } .explorer { max-height:none; } }
-
 .progress-row { display:flex; align-items:center; gap:12px; }
 .progress-main { flex:1; min-width:0; }
-
-.pathbar-inline { display:inline-flex; align-items:center; gap:6px; margin:0 4px; min-width:0; flex:1; }
-.pathbar-inline .label { color:#8b9bb4; font-size:12px; white-space:nowrap; }
-.pathbar-inline code { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:12px; }
-.header-actions:empty { display:none; }
 </style>

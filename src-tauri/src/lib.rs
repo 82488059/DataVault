@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, Manager};
 
@@ -241,6 +240,11 @@ fn start_index_backup_disk(app: tauri::AppHandle, drive: String) -> Result<JobSt
 #[tauri::command]
 fn cancel_controlled_job() -> Result<bool, String> {
     Ok(job::cancel_job())
+}
+
+#[tauri::command]
+fn cancel_job(job_id: String) -> Result<bool, String> {
+    Ok(job::cancel_job_id(&job_id))
 }
 
 #[tauri::command]
@@ -645,14 +649,11 @@ fn verify_backup(
 }
 
 
-static BACKUP_RUNNING: AtomicBool = AtomicBool::new(false);
-static BACKUP_CANCEL: AtomicBool = AtomicBool::new(false);
-static VERIFY_RUNNING: AtomicBool = AtomicBool::new(false);
-static VERIFY_CANCEL: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, Serialize)]
 pub struct BackupJobFinished {
     pub job_id: String,
+    pub kind: String,
     pub ok: bool,
     pub cancelled: bool,
     pub copied: usize,
@@ -685,22 +686,12 @@ pub struct GenericProgress {
 
 #[tauri::command]
 fn cancel_backup_job() -> Result<bool, String> {
-    if BACKUP_RUNNING.load(Ordering::SeqCst) {
-        BACKUP_CANCEL.store(true, Ordering::SeqCst);
-        Ok(true)
-    } else {
-        Ok(false)
-    }
+    Ok(job::cancel_kinds(&["backup"]))
 }
 
 #[tauri::command]
 fn cancel_verify_job() -> Result<bool, String> {
-    if VERIFY_RUNNING.load(Ordering::SeqCst) {
-        VERIFY_CANCEL.store(true, Ordering::SeqCst);
-        Ok(true)
-    } else {
-        Ok(false)
-    }
+    Ok(job::cancel_kinds(&["controlled-full", "controlled-quick", "batch", "verify"]))
 }
 
 #[tauri::command]
@@ -715,20 +706,7 @@ fn start_backup(
     if dest.trim().is_empty() {
         return Err("目标目录为空".into());
     }
-    if BACKUP_RUNNING
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
-    {
-        return Err("已有备份任务在进行中".into());
-    }
-    BACKUP_CANCEL.store(false, Ordering::SeqCst);
-    let job_id = format!(
-        "backup-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    );
+    let (job_id, cancel) = job::register_job("backup");
     let job_id_ret = job_id.clone();
     std::thread::Builder::new()
         .name("datavault-backup".into())
@@ -744,23 +722,47 @@ fn start_backup(
                     message: "开始备份…".into(),
                 },
             );
-            // Reuse sync backup; UI stays responsive because this is a background thread.
+            if job::is_cancelled(&cancel) {
+                let _ = app.emit(
+                    "backup-job-finished",
+                    BackupJobFinished {
+                        job_id: job_id.clone(),
+                        kind: "backup".into(),
+                        ok: false,
+                        cancelled: true,
+                        copied: 0,
+                        failed: 0,
+                        total: 0,
+                        message: "已取消".into(),
+                        batch: None,
+                    },
+                );
+                job::finish_job(&job_id);
+                return;
+            }
             let result = backup_paths(app.clone(), sources, dest);
             match result {
                 Ok(batch) => {
+                    let cancelled = job::is_cancelled(&cancel);
                     let copied = batch.files.iter().filter(|f| f.error.is_none()).count();
                     let failed = batch.files.iter().filter(|f| f.error.is_some()).count();
                     let total = batch.files.len();
+                    let message = if cancelled {
+                        format!("备份已取消：成功 {copied}，失败 {failed}，共 {total}")
+                    } else {
+                        format!("备份完成：成功 {copied}，失败 {failed}，共 {total}")
+                    };
                     let _ = app.emit(
                         "backup-job-finished",
                         BackupJobFinished {
                             job_id: job_id.clone(),
-                            ok: failed == 0,
-                            cancelled: false,
+                            kind: "backup".into(),
+                            ok: !cancelled && failed == 0,
+                            cancelled,
                             copied,
                             failed,
                             total,
-                            message: format!("备份完成：成功 {copied}，失败 {failed}，共 {total}"),
+                            message,
                             batch: Some(batch),
                         },
                     );
@@ -770,8 +772,9 @@ fn start_backup(
                         "backup-job-finished",
                         BackupJobFinished {
                             job_id: job_id.clone(),
+                            kind: "backup".into(),
                             ok: false,
-                            cancelled: BACKUP_CANCEL.load(Ordering::SeqCst),
+                            cancelled: job::is_cancelled(&cancel),
                             copied: 0,
                             failed: 0,
                             total: 0,
@@ -781,11 +784,10 @@ fn start_backup(
                     );
                 }
             }
-            BACKUP_RUNNING.store(false, Ordering::SeqCst);
-            BACKUP_CANCEL.store(false, Ordering::SeqCst);
+            job::finish_job(&job_id);
         })
         .map_err(|e| {
-            BACKUP_RUNNING.store(false, Ordering::SeqCst);
+            job::finish_job(&job_id_ret);
             format!("无法启动备份任务: {e}")
         })?;
     Ok(JobStart {
@@ -803,22 +805,13 @@ fn start_verify_controlled(
     rel_paths: Option<Vec<String>>,
     paths: Option<Vec<String>>,
 ) -> Result<JobStart, String> {
-    if VERIFY_RUNNING
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
-    {
-        return Err("已有校验任务在进行中".into());
-    }
-    VERIFY_CANCEL.store(false, Ordering::SeqCst);
-    let job_id = format!(
-        "verify-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    );
+    let kind = if mode == "full" {
+        "controlled-full"
+    } else {
+        "controlled-quick"
+    };
+    let (job_id, cancel) = job::register_job(kind);
     let job_id_ret = job_id.clone();
-    let kind = if mode == "full" { "controlled-full" } else { "controlled-quick" };
     let kind_s = kind.to_string();
     std::thread::Builder::new()
         .name("datavault-verify".into())
@@ -834,6 +827,22 @@ fn start_verify_controlled(
                     message: "正在校验受控文件…".into(),
                 },
             );
+            if job::is_cancelled(&cancel) {
+                let _ = app.emit(
+                    "verify-job-finished",
+                    VerifyJobFinished {
+                        job_id: job_id.clone(),
+                        kind: kind_s.clone(),
+                        ok: false,
+                        cancelled: true,
+                        message: "已取消".into(),
+                        controlled: None,
+                        batch: None,
+                    },
+                );
+                job::finish_job(&job_id);
+                return;
+            }
             let filter = if let Some(ps) = paths {
                 if ps.is_empty() {
                     rel_paths
@@ -855,8 +864,7 @@ fn start_verify_controlled(
                                     batch: None,
                                 },
                             );
-                            VERIFY_RUNNING.store(false, Ordering::SeqCst);
-                            VERIFY_CANCEL.store(false, Ordering::SeqCst);
+                            job::finish_job(&job_id);
                             return;
                         }
                     }
@@ -871,18 +879,29 @@ fn start_verify_controlled(
             };
             match result {
                 Ok(report) => {
-                    let msg = format!(
-                        "受控校验完成：通过 {}，失败 {}，缺失 {}，错误 {}",
-                        report.passed, report.failed, report.missing, report.errors
-                    );
-                    let ok = report.failed == 0 && report.missing == 0 && report.errors == 0;
+                    let cancelled = job::is_cancelled(&cancel);
+                    let msg = if cancelled {
+                        format!(
+                            "受控校验已取消：通过 {}，失败 {}，缺失 {}，错误 {}",
+                            report.passed, report.failed, report.missing, report.errors
+                        )
+                    } else {
+                        format!(
+                            "受控校验完成：通过 {}，失败 {}，缺失 {}，错误 {}",
+                            report.passed, report.failed, report.missing, report.errors
+                        )
+                    };
+                    let ok = !cancelled
+                        && report.failed == 0
+                        && report.missing == 0
+                        && report.errors == 0;
                     let _ = app.emit(
                         "verify-job-finished",
                         VerifyJobFinished {
-                            job_id,
+                            job_id: job_id.clone(),
                             kind: kind_s,
                             ok,
-                            cancelled: false,
+                            cancelled,
                             message: msg,
                             controlled: Some(report),
                             batch: None,
@@ -893,10 +912,10 @@ fn start_verify_controlled(
                     let _ = app.emit(
                         "verify-job-finished",
                         VerifyJobFinished {
-                            job_id,
+                            job_id: job_id.clone(),
                             kind: kind_s,
                             ok: false,
-                            cancelled: VERIFY_CANCEL.load(Ordering::SeqCst),
+                            cancelled: job::is_cancelled(&cancel),
                             message: e,
                             controlled: None,
                             batch: None,
@@ -904,13 +923,14 @@ fn start_verify_controlled(
                     );
                 }
             }
-            VERIFY_RUNNING.store(false, Ordering::SeqCst);
-            VERIFY_CANCEL.store(false, Ordering::SeqCst);
+            job::finish_job(&job_id);
         })
         .map_err(|e| {
-            VERIFY_RUNNING.store(false, Ordering::SeqCst);
+            job::finish_job(&job_id_ret);
             format!("无法启动校验任务: {e}")
         })?;
+    // Note: finish_job called inside thread; if Ok path moved job_id, we need finish after emit.
+    // Fix: always finish with job_id_ret clone inside — patch below carefully.
     Ok(JobStart {
         job_id: job_id_ret,
         total: 0,
@@ -924,20 +944,7 @@ fn start_verify_backup(
     batch_id: String,
     mode: String,
 ) -> Result<JobStart, String> {
-    if VERIFY_RUNNING
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
-    {
-        return Err("已有校验任务在进行中".into());
-    }
-    VERIFY_CANCEL.store(false, Ordering::SeqCst);
-    let job_id = format!(
-        "verify-batch-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    );
+    let (job_id, cancel) = job::register_job("batch");
     let job_id_ret = job_id.clone();
     std::thread::Builder::new()
         .name("datavault-verify-batch".into())
@@ -953,20 +960,44 @@ fn start_verify_backup(
                     message: "正在校验备份批次…".into(),
                 },
             );
+            if job::is_cancelled(&cancel) {
+                let _ = app.emit(
+                    "verify-job-finished",
+                    VerifyJobFinished {
+                        job_id: job_id.clone(),
+                        kind: "batch".into(),
+                        ok: false,
+                        cancelled: true,
+                        message: "已取消".into(),
+                        controlled: None,
+                        batch: None,
+                    },
+                );
+                job::finish_job(&job_id);
+                return;
+            }
             match verify_backup(app.clone(), batch_id, mode) {
                 Ok(report) => {
-                    let msg = format!(
-                        "批次校验完成：通过 {}，失败 {}",
-                        report.passed, report.failed
-                    );
-                    let ok = report.failed == 0;
+                    let cancelled = job::is_cancelled(&cancel);
+                    let msg = if cancelled {
+                        format!(
+                            "批次校验已取消：通过 {}，失败 {}",
+                            report.passed, report.failed
+                        )
+                    } else {
+                        format!(
+                            "批次校验完成：通过 {}，失败 {}",
+                            report.passed, report.failed
+                        )
+                    };
+                    let ok = !cancelled && report.failed == 0;
                     let _ = app.emit(
                         "verify-job-finished",
                         VerifyJobFinished {
-                            job_id,
+                            job_id: job_id.clone(),
                             kind: "batch".into(),
                             ok,
-                            cancelled: false,
+                            cancelled,
                             message: msg,
                             controlled: None,
                             batch: Some(report),
@@ -977,10 +1008,10 @@ fn start_verify_backup(
                     let _ = app.emit(
                         "verify-job-finished",
                         VerifyJobFinished {
-                            job_id,
+                            job_id: job_id.clone(),
                             kind: "batch".into(),
                             ok: false,
-                            cancelled: VERIFY_CANCEL.load(Ordering::SeqCst),
+                            cancelled: job::is_cancelled(&cancel),
                             message: e,
                             controlled: None,
                             batch: None,
@@ -988,11 +1019,10 @@ fn start_verify_backup(
                     );
                 }
             }
-            VERIFY_RUNNING.store(false, Ordering::SeqCst);
-            VERIFY_CANCEL.store(false, Ordering::SeqCst);
+            job::finish_job(&job_id);
         })
         .map_err(|e| {
-            VERIFY_RUNNING.store(false, Ordering::SeqCst);
+            job::finish_job(&job_id_ret);
             format!("无法启动批次校验: {e}")
         })?;
     Ok(JobStart {
@@ -1015,6 +1045,7 @@ pub fn run() {
             start_add_controlled_files,
             start_index_backup_disk,
             cancel_controlled_job,
+            cancel_job,
             controlled_job_running,
             list_controlled_files,
             resolve_controlled_selection,
