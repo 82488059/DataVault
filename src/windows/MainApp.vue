@@ -144,7 +144,15 @@ function resolveBackupDrive(): string {
   }
   return "";
 }
-const canIndex = computed(() => !!resolveBackupDrive());
+/** Single selected drive-letter root at 盘符 list (backup or not). */
+function resolveSelectedDriveRoot(): string {
+  if (currentPath.value) return "";
+  if (selected.value.size !== 1) return "";
+  const key = Array.from(selected.value)[0].replace(/\//g, "\\").toUpperCase();
+  if (!isDriveRootPath(key)) return "";
+  return key.endsWith("\\") ? key : key + "\\";
+}
+const canIndex = computed(() => !!resolveBackupDrive() || !!resolveSelectedDriveRoot());
 /** Enable quick/full verify when browsing a backup disk or when a backup drive letter is checked. */
 const canVerifyControlled = computed(() => !!resolveBackupDrive());
 
@@ -281,16 +289,38 @@ async function doBackup() {
 /** Unified index: selected files/dirs → add those; backup drive letter / no selection on backup disk → full-disk index. */
 async function doIndex() {
   errorMsg.value = ""; statusMsg.value = "";
-  const drive = resolveBackupDrive();
-  if (!drive) {
-    errorMsg.value = "请先进入已标记的备份盘，或在盘符列表勾选一个备份盘"; return;
-  }
+  let drive = resolveBackupDrive();
   const sel = Array.from(selected.value);
-  const onlyBackupRoot = !currentPath.value && sel.length > 0 && sel.every((p) => isDriveRootPath(p));
-  const pathSelection = sel.length > 0 && !onlyBackupRoot;
+  const selectedRoot = resolveSelectedDriveRoot();
+  const onlyDriveRootAtList = !currentPath.value && sel.length > 0 && sel.every((p) => isDriveRootPath(p));
+  const pathSelection = sel.length > 0 && !onlyDriveRootAtList;
+
+  // Non-backup drive letter at 盘符 list: confirm → mark → full-disk index
+  if (!drive && selectedRoot) {
+    const ok = window.confirm(
+      `「${selectedRoot}」尚未标记为备份盘。\n\n确认标记为 DataVault 备份盘并建立索引？\n将在该盘根目录创建 .datavault 元数据目录，然后扫描建索引。`
+    );
+    if (!ok) { statusMsg.value = "已取消"; return; }
+    busy.value = true;
+    try {
+      statusMsg.value = "正在标记备份盘…";
+      await invoke("mark_backup_disk", { drive: selectedRoot });
+      await refreshBackupDrives();
+      drive = selectedRoot;
+      statusMsg.value = `已标记备份盘：${selectedRoot}`;
+    } catch (e) {
+      errorMsg.value = String(e); statusMsg.value = ""; return;
+    } finally {
+      busy.value = false;
+    }
+  }
+
+  if (!drive) {
+    errorMsg.value = "请先进入已标记的备份盘，或在盘符列表勾选一个盘符"; return;
+  }
   try {
     if (pathSelection) {
-      if (!currentIsBackup.value) {
+      if (!currentIsBackup.value && !backupDriveSet.value.has(drive.toUpperCase())) {
         errorMsg.value = "请先在备份盘目录下勾选要索引的文件或目录"; return;
       }
       statusMsg.value = "已启动后台索引（勾选路径，跳过已受控）…";
@@ -543,8 +573,8 @@ onUnmounted(() => { for (const u of unlisteners) u(); unlisteners = []; });
 
         <section class="panel">
           <h2>备份索引</h2>
-          <p class="muted small">勾选文件/目录则仅索引所选；勾选备份盘符或进入备份盘未再勾选则索引全盘。已在 vault.db 中的跳过，不重算哈希。可与备份/校验并行。</p>
-          <button class="btn primary-outline" title="勾选文件/目录→索引所选；勾选备份盘符或未勾选→全盘索引（均跳过已受控）"
+          <p class="muted small">勾选文件/目录则仅索引所选；勾选备份盘符或进入备份盘未再勾选则索引全盘；勾选未标记盘符时确认后先标记再索引。已在 vault.db 中的跳过，不重算哈希。</p>
+          <button class="btn primary-outline" title="勾选文件/目录→索引所选；勾选备份盘符→全盘索引；勾选未标记盘符→确认后标记并索引"
             :disabled="!canIndex" @click="doIndex">建立备份索引</button>
         </section>
       </aside>
@@ -586,7 +616,7 @@ onUnmounted(() => { for (const u of unlisteners) u(); unlisteners = []; });
 </template>
 
 <style scoped>
-.app { min-height:100vh; background:#0f1419; color:#e7ecf3; font-family:"Segoe UI","Microsoft YaHei",system-ui,sans-serif; padding:14px 16px 18px; box-sizing:border-box; display:flex; flex-direction:column; gap:10px; }
+.app { min-height:100vh; height:100vh; overflow:hidden; background:#0f1419; color:#e7ecf3; font-family:"Segoe UI","Microsoft YaHei",system-ui,sans-serif; padding:14px 16px 18px; box-sizing:border-box; display:flex; flex-direction:column; gap:10px; }
 .header { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; }
 h1 { margin:0; font-size:1.35rem; font-weight:700; }
 .sub { color:#7aa2ff; font-weight:500; font-size:0.95rem; }
@@ -602,10 +632,12 @@ h1 { margin:0; font-size:1.35rem; font-weight:700; }
 .progress-track { height:8px; background:#0f1419; border-radius:999px; overflow:hidden; }
 .progress-fill { height:100%; background:linear-gradient(90deg,#2f5bff,#6d9bff); }
 .progress-file { margin-top:6px; font-size:0.78rem; color:#9aa7b8; word-break:break-all; }
-.layout { display:grid; grid-template-columns:1fr 320px; gap:12px; min-height:0; flex:1; }
-.side { display:flex; flex-direction:column; gap:10px; min-height:0; overflow:auto; }
+.layout { display:grid; grid-template-columns:1fr 320px; gap:12px; min-height:0; flex:1; align-items:stretch; }
+.side { display:flex; flex-direction:column; gap:10px; min-height:0; height:100%; overflow:auto; }
 .panel { background:#171d25; border:1px solid #2a3442; border-radius:12px; padding:12px; }
-.explorer { display:flex; flex-direction:column; min-height:0; max-height:calc(100vh - 280px); }
+/* Left browser stretches to match right column (校验+备份+索引) total height; list scrolls inside. */
+.explorer { display:flex; flex-direction:column; min-height:0; height:100%; max-height:none; overflow:hidden; }
+.explorer .table-wrap { flex:1; min-height:0; overflow:auto; }
 .pathbar { display:flex; align-items:center; gap:10px; margin-bottom:8px; width:100%; }
 .pathbar .label { color:#9aa7b8; font-size:0.8rem; white-space:nowrap; }
 .pathbar code.path-copy {
@@ -638,7 +670,7 @@ input[type="text"], select { background:#0f1419; border:1px solid #2a3442; color
 .badge.controlled { background:#5b3db8; margin-left:0; }
 .src-list { list-style:none; padding:0; margin:0 0 8px; max-height:90px; overflow:auto; font-size:0.78rem; }
 .src-list li { display:flex; justify-content:space-between; gap:6px; padding:4px 0; border-bottom:1px solid #243041; word-break:break-all; }
-.results-panel { max-height:min(320px, 36vh); overflow:auto; border-color:#3a4a63; }
+.results-panel { flex-shrink:0; max-height:min(240px, 28vh); overflow:auto; border-color:#3a4a63; }
 .results-panel h2 { color:#9db4ff; }
 .empty-results { padding:16px 8px; }
 .result-list { list-style:none; padding:0; margin:8px 0 0; max-height:220px; overflow:auto; }
@@ -647,7 +679,7 @@ input[type="text"], select { background:#0f1419; border:1px solid #2a3442; color
 .result-list li.bad { border-color:#7a2e2e; background:#201212; }
 .rel { font-weight:600; } .hash { font-family:ui-monospace,Consolas,monospace; color:#9aa7b8; word-break:break-all; }
 .verify-summary { margin-top:8px; }
-@media (max-width:1000px) { .layout { grid-template-columns:1fr; } .explorer { max-height:none; } }
+@media (max-width:1000px) { .layout { grid-template-columns:1fr; } .explorer { height:auto; max-height:50vh; } .side { height:auto; } }
 .progress-row { display:flex; align-items:center; gap:12px; }
 .progress-main { flex:1; min-width:0; }
 </style>
