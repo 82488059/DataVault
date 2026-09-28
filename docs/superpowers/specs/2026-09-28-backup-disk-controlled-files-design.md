@@ -215,12 +215,14 @@ return hex(ctx.digest())
 
 - 用户批准要点：盘根 `.datavault/`；`disk.json` 字段；`vault.db` / `controlled_files`；FastMD5 按 100MB 块取前 10%（含余块）；完整 MD5；UI 检测/标记/添加/双模式校验；本轮仅文档，后续 Rust/Vue，不做 MSI。
 
-## 增量行为（2026-09-28 后续）
+## 增量行为（2026-09-28 晚 · UI / 任务面板）
 
-在已批准设计之上补充（与多窗口 UI 一并落地）：
+在既有批准设计与先前增量之上补充：
 
-1. **校验范围**：除「全部受控」外，支持按用户勾选的目录和/或文件缩小范围。实现上调用 `resolve_controlled_selection`：将绝对路径展开并与 `controlled_files` 求交；**未受控路径静默忽略**，不进入 UI 列表与校验结果。勾选**备份盘符根**时视为全盘受控（`resolve_controlled_selection` 对盘根路径返回全部）；UI 在盘符列表勾选备份盘时启用快速/完整校验，非备份盘符不启用。
-2. **UI 受控标记**：`list_dir` 增加 `is_controlled`。文件：`rel_path` 在库中；目录：其下至少有一条受控 `rel_path` 前缀匹配。主窗口与备份窗口展示「受控」徽章。
-3. **跳过重哈希**：`start_add_controlled_files` / `start_index_backup_disk`（及同步 `add_controlled_files`）在计算 MD5/FastMD5 前跳过库中已有 `rel_path`，完成消息报告 `skipped`。
-4. **设为目标目录**：备份窗口允许勾选**一个**目录作为备份目标；未勾选时回退为当前浏览目录。
-5. **标记备份盘仅限盘符根**：`mark_backup_disk` 只接受 `X:` / `X:\`；子目录路径直接拒绝。UI 仅在盘符列表或已进入盘根时可用。
+1. **产品文案「受控」**：界面优先使用「受控盘」「标记为受控」「受控」徽章；磁盘元数据字段仍为 `is_backup_disk` / `mark_backup_disk`，与本节 schema 兼容。
+2. **列表列**：浏览与高级窗统一为 **名称 / 大小 / 受控 / 数量**；目录「数量」= 受控文件数/总文件数（异步计数）；去掉「类型」「标记」列。
+3. **建立备份索引**：单一入口，合并原「添加受控文件」；行为仍为 upsert `controlled_files` 且跳过已有 `rel_path`。
+4. **多任务状态面板**：主窗下方「状态」展示并行 Job；中文任务标签；进度含当前相对路径；取消在任务展开区。
+5. **校验四态对齐**：受控与**批次**校验均使用 `pass` / `fail` / `missing` / `error`，汇总 `passed` / `failed` / `missing` / `errors`；UI 可点击筛选。
+6. **高级窗口**：高级校验（目录+批次）、高级备份（双栏）；不改变盘上 `disk.json` / `vault.db` 布局。
+7. **FastMD5**：仍以本节 100MB×10% 为准；README 中旧「头/尾 64KB」描述已废弃，仅作历史对照。
