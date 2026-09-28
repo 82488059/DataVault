@@ -75,7 +75,6 @@ function applyDirCount(path: string, controlled_count: number, total_files: numb
   const next = list.slice();
   next[i] = { ...next[i], controlled_count, total_files };
   dirEntries.value = next;
-    void requestDirFileCounts(dirEntries.value);
 }
 async function requestDirFileCounts(list: DirEntry[]) {
   const paths = list.filter((e) => e.is_dir && e.is_controlled).map((e) => e.path);
@@ -158,17 +157,17 @@ async function loadDir(path: string) {
   errorMsg.value = "";
   try {
     if (!path) {
-      const drives = await invoke<DirEntry[]>("list_drives");
+      const drives = await invoke<DirEntry[]>("list_dir", { path: "" });
       // Only already-marked backup disks
       dirEntries.value = drives.filter((d) => d.is_backup_disk);
-    void requestDirFileCounts(dirEntries.value);
+      void requestDirFileCounts(dirEntries.value);
     } else {
       const raw = await invoke<DirEntry[]>("list_dir", { path });
       // Only controlled files / dirs containing controlled paths
       dirEntries.value = raw.filter(
         (e) => e.name.toLowerCase() !== ".datavault" && e.is_controlled,
       );
-    void requestDirFileCounts(dirEntries.value);
+      void requestDirFileCounts(dirEntries.value);
     }
     dirPath.value = path;
     dirSelected.value = new Set();

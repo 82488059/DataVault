@@ -334,11 +334,12 @@ fn list_dir(path: String) -> Result<Vec<DirEntryInfo>, String> {
             ds.into_iter()
                 .map(|d| DirEntryInfo {
                     name: d.path.clone(),
-                    path: d.path,
+                    path: d.path.clone(),
                     is_dir: true,
                     size: 0,
                     is_backup_disk: d.is_backup_disk,
-                    is_controlled: false,
+                    // Drive root row: marked backup disk => controlled (counts filled async).
+                    is_controlled: d.is_backup_disk,
                     controlled_count: None,
                     total_files: None,
                 })

@@ -114,7 +114,7 @@ async function loadSrc(path: string) {
   errorMsg.value = "";
   try {
     if (!path) {
-      srcEntries.value = await invoke<DirEntry[]>("list_drives");
+      srcEntries.value = await invoke<DirEntry[]>("list_dir", { path: "" });
     } else {
       const raw = await invoke<DirEntry[]>("list_dir", { path });
       srcEntries.value = raw.filter((e) => e.name.toLowerCase() !== ".datavault");
@@ -129,7 +129,7 @@ async function loadDst(path: string) {
   errorMsg.value = "";
   try {
     if (!path) {
-      dstEntries.value = await invoke<DirEntry[]>("list_drives");
+      dstEntries.value = await invoke<DirEntry[]>("list_dir", { path: "" });
       dstPath.value = "";
       dstSelected.value = "";
       void requestDirFileCounts(dstEntries.value);
