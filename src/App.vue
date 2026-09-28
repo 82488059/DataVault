@@ -557,7 +557,6 @@ onUnmounted(() => {
                 <th>名称</th>
                 <th style="width: 80px">类型</th>
                 <th style="width: 100px">大小</th>
-                <th style="width: 90px">标记</th>
               </tr>
             </thead>
             <tbody>
@@ -580,12 +579,9 @@ onUnmounted(() => {
                 </td>
                 <td>{{ e.is_dir || isDriveRootPath(e.path) ? "文件夹" : "文件" }}</td>
                 <td>{{ e.is_dir || isDriveRootPath(e.path) ? "—" : formatSize(e.size) }}</td>
-                <td>
-                  <span v-if="e.is_backup_disk" class="badge backup">受控盘</span>
-                </td>
               </tr>
               <tr v-if="!entries.length">
-                <td colspan="5" class="muted center">空目录或无法访问</td>
+                <td colspan="4" class="muted center">空目录或无法访问</td>
               </tr>
             </tbody>
           </table>

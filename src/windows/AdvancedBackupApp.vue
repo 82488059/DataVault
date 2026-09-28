@@ -266,7 +266,7 @@ onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } })
             <thead>
               <tr>
                 <th style="width:36px"></th><th>名称</th><th style="width:70px">类型</th>
-                <th style="width:90px">大小</th><th style="width:80px">标记</th><th style="width:60px">受控</th>
+                <th style="width:90px">大小</th><th style="width:60px">受控</th>
               </tr>
             </thead>
             <tbody>
@@ -277,13 +277,12 @@ onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } })
                 </td>
                 <td>{{ e.is_dir || e.is_backup_disk || isDriveRoot(e.path) ? "文件夹" : "文件" }}</td>
                 <td>{{ e.is_dir || e.is_backup_disk || isDriveRoot(e.path) ? "—" : formatSize(e.size) }}</td>
-                <td><span v-if="e.is_backup_disk" class="badge backup">受控盘</span></td>
                 <td>
                   <span v-if="e.is_dir && e.is_controlled" class="badge controlled" title="受控文件数/总文件数">{{ e.controlled_count != null && e.total_files != null ? e.controlled_count + '/' + e.total_files : '…' }}</span>
                   <span v-else-if="e.is_controlled" class="badge controlled" title="已在 vault.db 登记">受控</span>
                 </td>
               </tr>
-              <tr v-if="!srcEntries.length"><td colspan="6" class="muted center">空目录或无法访问</td></tr>
+              <tr v-if="!srcEntries.length"><td colspan="5" class="muted center">空目录或无法访问</td></tr>
             </tbody>
           </table>
         </div>
@@ -302,7 +301,6 @@ onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } })
             <thead>
               <tr>
                 <th style="width:36px"></th><th>名称</th><th style="width:70px">类型</th>
-                <th style="width:80px">标记</th>
               </tr>
             </thead>
             <tbody>
@@ -316,13 +314,12 @@ onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } })
                   <span class="icon" aria-hidden="true">📁</span>{{ e.name || e.path }}
                 </td>
                 <td>文件夹</td>
-                <td><span v-if="e.is_backup_disk" class="badge backup">受控盘</span></td>
               </tr>
               <tr v-if="!dstEntries.length && !dstPath">
-                <td colspan="4" class="muted center">无可用受控盘。请先在主窗口「标记为受控」。</td>
+                <td colspan="3" class="muted center">无可用受控盘。请先在主窗口「标记为受控」。</td>
               </tr>
               <tr v-if="!dstEntries.length && dstPath" class="selected dest-here-row">
-                <td colspan="4" class="muted center dest-here">
+                <td colspan="3" class="muted center dest-here">
                   <div>备份到此目录（当前为空）</div>
                   <strong class="dest-path">{{ dstSelected || dstPath }}</strong>
                 </td>
