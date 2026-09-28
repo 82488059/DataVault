@@ -223,7 +223,7 @@ function resolveSelectedDriveRoot(): string {
   if (!isDriveRootPath(key)) return "";
   return key.endsWith("\\") ? key : key + "\\";
 }
-const canIndex = computed(() => !!resolveBackupDrive() || !!resolveSelectedDriveRoot());
+const canIndex = computed(() => selected.value.size > 0 && (!!resolveBackupDrive() || !!resolveSelectedDriveRoot()));
 /** Enable quick/full verify when browsing a backup disk or when a backup drive letter is checked. */
 const canVerifyControlled = computed(() => !!resolveBackupDrive());
 
