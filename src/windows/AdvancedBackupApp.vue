@@ -266,7 +266,7 @@ onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } })
             <thead>
               <tr>
                 <th style="width:36px"></th><th>名称</th><th style="width:70px">类型</th>
-                <th style="width:90px">大小</th><th style="width:60px">受控</th>
+                <th style="width:90px">大小</th><th style="width:60px">受控</th><th style="width:90px">数量</th>
               </tr>
             </thead>
             <tbody>
@@ -278,11 +278,13 @@ onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } })
                 <td>{{ e.is_dir || e.is_backup_disk || isDriveRoot(e.path) ? "文件夹" : "文件" }}</td>
                 <td>{{ e.is_dir || e.is_backup_disk || isDriveRoot(e.path) ? "—" : formatSize(e.size) }}</td>
                 <td>
-                  <span v-if="e.is_dir && e.is_controlled" class="badge controlled" title="受控文件数/总文件数">{{ e.controlled_count != null && e.total_files != null ? e.controlled_count + '/' + e.total_files : '…' }}</span>
-                  <span v-else-if="e.is_controlled" class="badge controlled" title="已在 vault.db 登记">受控</span>
+                  <span v-if="e.is_controlled" class="badge controlled" title="已在 vault.db 登记">受控</span>
+                </td>
+                <td>
+                  <span v-if="e.is_dir && e.is_controlled" title="受控文件数/总文件数">{{ e.controlled_count != null && e.total_files != null ? e.controlled_count + '/' + e.total_files : '…' }}</span>
                 </td>
               </tr>
-              <tr v-if="!srcEntries.length"><td colspan="5" class="muted center">空目录或无法访问</td></tr>
+              <tr v-if="!srcEntries.length"><td colspan="6" class="muted center">空目录或无法访问</td></tr>
             </tbody>
           </table>
         </div>
@@ -370,7 +372,7 @@ tr.selected { background:#1e2a40; } tr:hover { background:#1a222e; }
 .muted { color:#9aa7b8; font-size:0.8rem; } .small { font-size:0.78rem; } .center { text-align:center; }
 .badge { font-size:0.72rem; background:#2f5bff; padding:2px 8px; border-radius:999px; margin-left:6px; }
 .badge.backup { background:#1f6b45; margin-left:0; }
-.badge.controlled { background:#5b3db8; margin-left:0; }
+.badge.controlled { background:#1f6b45; margin-left:0; }
 .dest-here { padding:14px 10px; line-height:1.5; }
 .dest-here .dest-path { display:block; margin-top:6px; color:#9db4ff; word-break:break-all; font-size:0.85rem; }
 .dest-here-row { background:#1e2a40; }

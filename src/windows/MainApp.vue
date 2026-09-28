@@ -590,7 +590,7 @@ onUnmounted(() => { for (const u of unlisteners) u(); unlisteners = []; });
             <thead>
               <tr>
                 <th style="width:36px"></th><th>名称</th><th style="width:70px">类型</th>
-                <th style="width:90px">大小</th><th style="width:60px">受控</th>
+                <th style="width:90px">大小</th><th style="width:60px">受控</th><th style="width:90px">数量</th>
               </tr>
             </thead>
             <tbody>
@@ -602,11 +602,13 @@ onUnmounted(() => { for (const u of unlisteners) u(); unlisteners = []; });
                 <td>{{ e.is_dir || isDriveRootPath(e.path) ? "文件夹" : "文件" }}</td>
                 <td>{{ e.is_dir || isDriveRootPath(e.path) ? "—" : formatSize(e.size) }}</td>
                 <td>
-                  <span v-if="e.is_dir && e.is_controlled" class="badge controlled" title="受控文件数/总文件数">{{ e.controlled_count != null && e.total_files != null ? e.controlled_count + '/' + e.total_files : '…' }}</span>
-                  <span v-else-if="e.is_controlled" class="badge controlled" title="已在 vault.db 登记">受控</span>
+                  <span v-if="e.is_controlled" class="badge controlled" title="已在 vault.db 登记">受控</span>
+                </td>
+                <td>
+                  <span v-if="e.is_dir && e.is_controlled" title="受控文件数/总文件数">{{ e.controlled_count != null && e.total_files != null ? e.controlled_count + '/' + e.total_files : '…' }}</span>
                 </td>
               </tr>
-              <tr v-if="!entries.length"><td colspan="5" class="muted center">空目录或无法访问</td></tr>
+              <tr v-if="!entries.length"><td colspan="6" class="muted center">空目录或无法访问</td></tr>
             </tbody>
           </table>
         </div>
@@ -774,7 +776,7 @@ input[type="text"], select { background:#0f1419; border:1px solid #2a3442; color
 .pass { color:#6dffa0; } .fail { color:#ff8f8f; }
 .badge { font-size:0.72rem; background:#2f5bff; padding:2px 8px; border-radius:999px; margin-left:6px; }
 .badge.backup { background:#1f6b45; }
-.badge.controlled { background:#5b3db8; margin-left:0; }
+.badge.controlled { background:#1f6b45; margin-left:0; }
 .src-list { list-style:none; padding:0; margin:0 0 4px; max-height:52px; overflow:auto; font-size:0.78rem; scrollbar-width:none; }
 .src-list::-webkit-scrollbar { width:0; height:0; display:none; }
 .src-list li { display:flex; justify-content:space-between; gap:6px; padding:4px 0; border-bottom:1px solid #243041; word-break:break-all; }

@@ -311,7 +311,7 @@ onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } })
             <thead>
               <tr>
                 <th style="width:36px"></th><th>名称</th><th style="width:70px">类型</th>
-                <th style="width:90px">大小</th><th style="width:60px">受控</th>
+                <th style="width:90px">大小</th><th style="width:60px">受控</th><th style="width:90px">数量</th>
               </tr>
             </thead>
             <tbody>
@@ -323,12 +323,14 @@ onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } })
                 <td>{{ e.is_dir || e.is_backup_disk || isDriveRoot(e.path) ? "文件夹" : "文件" }}</td>
                 <td>{{ e.is_dir || e.is_backup_disk ? "—" : formatSize(e.size) }}</td>
                 <td>
-                  <span v-if="e.is_dir && e.is_controlled" class="badge controlled" title="受控文件数/总文件数">{{ e.controlled_count != null && e.total_files != null ? e.controlled_count + '/' + e.total_files : '…' }}</span>
-                  <span v-else-if="e.is_controlled" class="badge controlled" title="已在 vault.db 登记">受控</span>
+                  <span v-if="e.is_controlled" class="badge controlled" title="已在 vault.db 登记">受控</span>
+                </td>
+                <td>
+                  <span v-if="e.is_dir && e.is_controlled" title="受控文件数/总文件数">{{ e.controlled_count != null && e.total_files != null ? e.controlled_count + '/' + e.total_files : '…' }}</span>
                 </td>
               </tr>
               <tr v-if="!dirEntries.length">
-                <td colspan="5" class="muted center">{{ dirPath ? "此目录下无受控项" : "无受控盘。请先在主窗口「标记为受控」。" }}</td>
+                <td colspan="6" class="muted center">{{ dirPath ? "此目录下无受控项" : "无受控盘。请先在主窗口「标记为受控」。" }}</td>
               </tr>
             </tbody>
           </table>
@@ -441,7 +443,7 @@ tr.selected { background:#1e2a40; } tr:hover { background:#1a222e; }
 .pass { color:#6dffa0; } .fail { color:#ff8f8f; }
 .badge { font-size:0.72rem; background:#2f5bff; padding:2px 8px; border-radius:999px; margin-left:6px; }
 .badge.backup { background:#1f6b45; margin-left:0; }
-.badge.controlled { background:#5b3db8; margin-left:0; }
+.badge.controlled { background:#1f6b45; margin-left:0; }
 .results { flex-shrink:0; max-height:min(220px, 24vh); overflow:hidden; display:flex; flex-direction:column; min-height:0; }
 .results .verify-summary, .results .result-block { flex:1 1 auto; min-height:0; display:flex; flex-direction:column; overflow:hidden; }
 .results .result-list { flex:1 1 auto; min-height:0; max-height:140px; overflow:auto; }
