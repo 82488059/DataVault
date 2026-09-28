@@ -299,7 +299,7 @@ onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } })
           <table>
             <thead>
               <tr>
-                <th style="width:36px"></th><th>名称</th><th style="width:70px">类型</th>
+                <th style="width:36px"></th><th>名称</th>
                 <th style="width:90px">大小</th><th style="width:60px">受控</th><th style="width:90px">数量</th>
               </tr>
             </thead>
@@ -309,7 +309,6 @@ onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } })
                 <td class="name" @click="isFolderEntry(e) ? openSrc(e) : toggleSrc(e.path)">
                   <span class="icon" aria-hidden="true">{{ isFolderEntry(e) ? "📁" : "📄" }}</span>{{ e.name || e.path }}
                 </td>
-                <td>{{ isFolderEntry(e) ? "文件夹" : "文件" }}</td>
                 <td>{{ isFolderEntry(e) ? "—" : formatSize(e.size) }}</td>
                 <td>
                   <span v-if="e.is_controlled" class="badge controlled" title="已在 vault.db 登记">受控</span>
@@ -318,7 +317,7 @@ onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } })
                   <span v-if="e.is_dir && e.is_controlled" title="受控文件数/总文件数">{{ e.controlled_count != null && e.total_files != null ? e.controlled_count + '/' + e.total_files : '…' }}</span>
                 </td>
               </tr>
-              <tr v-if="!srcEntries.length"><td colspan="6" class="muted center">空目录或无法访问</td></tr>
+              <tr v-if="!srcEntries.length"><td colspan="5" class="muted center">空目录或无法访问</td></tr>
             </tbody>
           </table>
         </div>
@@ -336,7 +335,7 @@ onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } })
           <table>
             <thead>
               <tr>
-                <th style="width:36px"></th><th>名称</th><th style="width:70px">类型</th>
+                <th style="width:36px"></th><th>名称</th>
                 <th style="width:90px">大小</th><th style="width:60px">受控</th><th style="width:90px">数量</th>
               </tr>
             </thead>
@@ -351,7 +350,6 @@ onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } })
                 <td class="name" @click="isFolderEntry(e) ? openDst(e) : undefined">
                   <span class="icon" aria-hidden="true">{{ isFolderEntry(e) ? "📁" : "📄" }}</span>{{ e.name || e.path }}
                 </td>
-                <td>{{ isFolderEntry(e) ? "文件夹" : "文件" }}</td>
                 <td>{{ isFolderEntry(e) ? "—" : formatSize(e.size) }}</td>
                 <td>
                   <span v-if="e.is_controlled" class="badge controlled" title="已在 vault.db 登记">受控</span>
@@ -361,10 +359,10 @@ onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } })
                 </td>
               </tr>
               <tr v-if="!dstEntries.length && !dstPath">
-                <td colspan="6" class="muted center">无可用盘符</td>
+                <td colspan="5" class="muted center">无可用盘符</td>
               </tr>
               <tr v-if="!dstEntries.length && dstPath" class="selected dest-here-row">
-                <td colspan="6" class="muted center dest-here">
+                <td colspan="5" class="muted center dest-here">
                   <div>备份到此目录（当前为空）</div>
                   <strong class="dest-path">{{ dstSelected || dstPath }}</strong>
                 </td>

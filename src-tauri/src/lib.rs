@@ -68,6 +68,8 @@ pub struct VerifyItem {
     pub src_hash: Option<String>,
     pub dest_hash: Option<String>,
     pub ok: bool,
+    /// pass | fail | missing | error — same four statuses as controlled verify
+    pub status: String,
     pub message: String,
 }
 
@@ -78,6 +80,8 @@ pub struct VerifyReport {
     pub items: Vec<VerifyItem>,
     pub passed: usize,
     pub failed: usize,
+    pub missing: usize,
+    pub errors: usize,
 }
 
 fn metadata_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -630,6 +634,8 @@ fn verify_backup_inner(
     let mut items = Vec::new();
     let mut passed = 0usize;
     let mut failed = 0usize;
+    let mut missing = 0usize;
+    let mut errors = 0usize;
 
     let total = batch.files.len();
     for (i, f) in batch.files.iter().enumerate() {
@@ -652,6 +658,7 @@ fn verify_backup_inner(
             );
         }
         if f.error.is_some() {
+            errors += 1;
             items.push(VerifyItem {
                 rel_path: f.rel_path.clone(),
                 src_path: f.src_path.clone(),
@@ -659,14 +666,21 @@ fn verify_backup_inner(
                 src_hash: None,
                 dest_hash: None,
                 ok: false,
+                status: "error".into(),
                 message: format!("备份时失败: {}", f.error.clone().unwrap_or_default()),
             });
-            failed += 1;
             continue;
         }
         let src = Path::new(&f.src_path);
         let dest = Path::new(&f.dest_path);
         if !src.exists() || !dest.exists() {
+            missing += 1;
+            let msg = match (src.exists(), dest.exists()) {
+                (false, false) => "源与目标文件均缺失",
+                (false, true) => "源文件缺失",
+                (true, false) => "目标文件缺失",
+                _ => "源或目标文件缺失",
+            };
             items.push(VerifyItem {
                 rel_path: f.rel_path.clone(),
                 src_path: f.src_path.clone(),
@@ -674,9 +688,9 @@ fn verify_backup_inner(
                 src_hash: None,
                 dest_hash: None,
                 ok: false,
-                message: "源或目标文件缺失".into(),
+                status: "missing".into(),
+                message: msg.into(),
             });
-            failed += 1;
             continue;
         }
         let (src_hash, dest_hash) = if use_full {
@@ -702,15 +716,16 @@ fn verify_backup_inner(
                     src_hash: Some(sh),
                     dest_hash: Some(dh),
                     ok,
+                    status: if ok { "pass".into() } else { "fail".into() },
                     message: if ok {
-                        "一致".into()
+                        "通过".into()
                     } else {
-                        "不一致".into()
+                        "哈希不一致".into()
                     },
                 });
             }
             (Err(e), _) | (_, Err(e)) => {
-                failed += 1;
+                errors += 1;
                 items.push(VerifyItem {
                     rel_path: f.rel_path.clone(),
                     src_path: f.src_path.clone(),
@@ -718,6 +733,7 @@ fn verify_backup_inner(
                     src_hash: None,
                     dest_hash: None,
                     ok: false,
+                    status: "error".into(),
                     message: e,
                 });
             }
@@ -734,9 +750,10 @@ fn verify_backup_inner(
         items,
         passed,
         failed,
+        missing,
+        errors,
     })
 }
-
 
 
 #[derive(Debug, Clone, Serialize)]
@@ -800,7 +817,7 @@ fn cancel_backup_job() -> Result<bool, String> {
 
 #[tauri::command]
 fn cancel_verify_job() -> Result<bool, String> {
-    Ok(job::cancel_kinds(&["controlled-full", "controlled-quick", "batch", "verify"]))
+    Ok(job::cancel_kinds(&["controlled-full", "controlled-quick", "batch", "batch-full", "batch-quick", "verify"]))
 }
 
 #[tauri::command]
@@ -1094,11 +1111,15 @@ fn start_verify_backup(
     batch_id: String,
     mode: String,
 ) -> Result<JobStart, String> {
-    let (job_id, cancel) = job::register_job("batch");
+    let use_full = mode == "full" || mode == "完整" || mode == "完整校验";
+    let kind = if use_full { "batch-full" } else { "batch-quick" };
+    let (job_id, cancel) = job::register_job(kind);
     let job_id_ret = job_id.clone();
+    let kind_owned = kind.to_string();
     std::thread::Builder::new()
         .name("datavault-verify-batch".into())
         .spawn(move || {
+            let kind = kind_owned;
             let _ = app.emit(
                 "verify-job-progress",
                 GenericProgress {
@@ -1115,7 +1136,7 @@ fn start_verify_backup(
                     "verify-job-finished",
                     VerifyJobFinished {
                         job_id: job_id.clone(),
-                        kind: "batch".into(),
+                        kind: kind.clone(),
                         ok: false,
                         cancelled: true,
                         message: "已取消".into(),
@@ -1131,21 +1152,24 @@ fn start_verify_backup(
                     let cancelled = job::is_cancelled(&cancel);
                     let msg = if cancelled {
                         format!(
-                            "批次校验已取消：通过 {}，失败 {}",
-                            report.passed, report.failed
+                            "批次校验已取消：通过 {}，失败 {}，缺失 {}，错误 {}",
+                            report.passed, report.failed, report.missing, report.errors
                         )
                     } else {
                         format!(
-                            "批次校验完成：通过 {}，失败 {}",
-                            report.passed, report.failed
+                            "批次校验完成：通过 {}，失败 {}，缺失 {}，错误 {}",
+                            report.passed, report.failed, report.missing, report.errors
                         )
                     };
-                    let ok = !cancelled && report.failed == 0;
+                    let ok = !cancelled
+                        && report.failed == 0
+                        && report.missing == 0
+                        && report.errors == 0;
                     let _ = app.emit(
                         "verify-job-finished",
                         VerifyJobFinished {
                             job_id: job_id.clone(),
-                            kind: "batch".into(),
+                            kind: kind.clone(),
                             ok,
                             cancelled,
                             message: msg,
@@ -1159,7 +1183,7 @@ fn start_verify_backup(
                         "verify-job-finished",
                         VerifyJobFinished {
                             job_id: job_id.clone(),
-                            kind: "batch".into(),
+                            kind: kind.clone(),
                             ok: false,
                             cancelled: job::is_cancelled(&cancel),
                             message: e,
@@ -1178,7 +1202,7 @@ fn start_verify_backup(
     Ok(JobStart {
         job_id: job_id_ret,
         total: 0,
-        kind: "batch".into(),
+        kind: kind.clone(),
     })
 }
 

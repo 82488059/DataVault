@@ -36,6 +36,7 @@ interface VerifyItem {
   src_hash: string | null;
   dest_hash: string | null;
   ok: boolean;
+  status: string;
   message: string;
 }
 
@@ -45,6 +46,8 @@ interface VerifyReport {
   items: VerifyItem[];
   passed: number;
   failed: number;
+  missing: number;
+  errors: number;
 }
 
 interface ControlledFile {
@@ -440,7 +443,7 @@ async function doVerify(mode: "full" | "quick") {
       batchId: verifyBatchId.value,
       mode,
     });
-    statusMsg.value = `${mode === "full" ? "完整" : "快速"}校验完成：通过 ${verifyReport.value.passed}，失败 ${verifyReport.value.failed}`;
+    statusMsg.value = `${mode === "full" ? "完整" : "快速"}校验完成：通过 ${verifyReport.value.passed}，失败 ${verifyReport.value.failed}，缺失 ${verifyReport.value.missing}，错误 ${verifyReport.value.errors}`;
   } catch (e) {
     errorMsg.value = String(e);
     statusMsg.value = "";
@@ -555,7 +558,6 @@ onUnmounted(() => {
               <tr>
                 <th style="width: 36px"></th>
                 <th>名称</th>
-                <th style="width: 80px">类型</th>
                 <th style="width: 100px">大小</th>
               </tr>
             </thead>
@@ -577,11 +579,10 @@ onUnmounted(() => {
                   <span class="icon">{{ e.is_dir || isDriveRootPath(e.path) ? "📁" : "📄" }}</span>
                   {{ e.name }}
                 </td>
-                <td>{{ e.is_dir || isDriveRootPath(e.path) ? "文件夹" : "文件" }}</td>
                 <td>{{ e.is_dir || isDriveRootPath(e.path) ? "—" : formatSize(e.size) }}</td>
               </tr>
               <tr v-if="!entries.length">
-                <td colspan="4" class="muted center">空目录或无法访问</td>
+                <td colspan="3" class="muted center">空目录或无法访问</td>
               </tr>
             </tbody>
           </table>
@@ -685,7 +686,8 @@ onUnmounted(() => {
           </h2>
           <p>
             通过 <strong class="pass">{{ verifyReport.passed }}</strong> / 失败
-            <strong class="fail">{{ verifyReport.failed }}</strong>
+            <strong class="fail">{{ verifyReport.failed }}</strong> / 缺失
+            {{ verifyReport.missing }} / 错误 {{ verifyReport.errors }}
           </p>
           <ul class="result-list">
             <li v-for="(it, i) in verifyReport.items" :key="i" :class="{ ok: it.ok, bad: !it.ok }">

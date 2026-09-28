@@ -26,10 +26,13 @@ interface JobProgress {
 }
 interface VerifyItem {
   rel_path: string; src_path: string; dest_path: string;
-  src_hash: string | null; dest_hash: string | null; ok: boolean; message: string;
+  src_hash: string | null; dest_hash: string | null; ok: boolean;
+  status: string; // pass | fail | missing | error
+  message: string;
 }
 interface VerifyReport {
-  batch_id: string; mode: string; items: VerifyItem[]; passed: number; failed: number;
+  batch_id: string; mode: string; items: VerifyItem[];
+  passed: number; failed: number; missing: number; errors: number;
 }
 interface ControlledVerifyItem {
   rel_path: string; status: string; message: string;
@@ -63,9 +66,9 @@ const statusMsg = ref("");
 const progress = ref<JobProgress | null>(null);
 const lastReport = ref<VerifyReport | null>(null);
 const controlledReport = ref<ControlledVerifyReport | null>(null);
-type ControlledStatusFilter = "pass" | "fail" | "missing" | "error";
-const controlledStatusFilter = ref<ControlledStatusFilter | null>(null);
-const batchStatusFilter = ref<"pass" | "fail" | null>(null);
+type VerifyStatusFilter = "pass" | "fail" | "missing" | "error";
+const controlledStatusFilter = ref<VerifyStatusFilter | null>(null);
+const batchStatusFilter = ref<VerifyStatusFilter | null>(null);
 const filteredControlledItems = computed(() => {
   const items = controlledReport.value?.items ?? [];
   const f = controlledStatusFilter.value;
@@ -76,13 +79,22 @@ const filteredBatchItems = computed(() => {
   const items = lastReport.value?.items ?? [];
   const f = batchStatusFilter.value;
   if (!f) return items;
-  return items.filter((it) => (f === "pass" ? it.ok : !it.ok));
+  return items.filter((it) => it.status === f);
 });
-function toggleControlledStatusFilter(status: ControlledStatusFilter) {
+function toggleControlledStatusFilter(status: VerifyStatusFilter) {
   controlledStatusFilter.value = controlledStatusFilter.value === status ? null : status;
 }
-function toggleBatchStatusFilter(status: "pass" | "fail") {
+function toggleBatchStatusFilter(status: VerifyStatusFilter) {
   batchStatusFilter.value = batchStatusFilter.value === status ? null : status;
+}
+function statusLabel(status: string): string {
+  switch (status) {
+    case "pass": return "通过";
+    case "fail": return "失败";
+    case "missing": return "缺失";
+    case "error": return "错误";
+    default: return status || "—";
+  }
 }
 const unlisteners: UnlistenFn[] = [];
 
@@ -334,7 +346,7 @@ onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } })
           <table>
             <thead>
               <tr>
-                <th style="width:36px"></th><th>名称</th><th style="width:70px">类型</th>
+                <th style="width:36px"></th><th>名称</th>
                 <th style="width:90px">大小</th><th style="width:60px">受控</th><th style="width:90px">数量</th>
               </tr>
             </thead>
@@ -344,7 +356,6 @@ onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } })
                 <td class="name" @click="(e.is_dir || e.is_backup_disk || isDriveRoot(e.path)) ? openDirEntry(e) : toggleDir(e.path)">
                   <span class="icon" aria-hidden="true">{{ (e.is_dir || e.is_backup_disk || isDriveRoot(e.path)) ? "📁" : "📄" }}</span>{{ e.name || e.path }}
                 </td>
-                <td>{{ e.is_dir || e.is_backup_disk || isDriveRoot(e.path) ? "文件夹" : "文件" }}</td>
                 <td>{{ e.is_dir || e.is_backup_disk ? "—" : formatSize(e.size) }}</td>
                 <td>
                   <span v-if="e.is_controlled" class="badge controlled" title="已在 vault.db 登记">受控</span>
@@ -354,7 +365,7 @@ onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } })
                 </td>
               </tr>
               <tr v-if="!dirEntries.length">
-                <td colspan="6" class="muted center">{{ dirPath ? "此目录下无受控项" : "无受控盘。请先在主窗口「标记为受控」。" }}</td>
+                <td colspan="5" class="muted center">{{ dirPath ? "此目录下无受控项" : "无受控盘。请先在主窗口「标记为受控」。" }}</td>
               </tr>
             </tbody>
           </table>
@@ -416,7 +427,7 @@ onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } })
       <ul class="result-list">
         <li v-for="(it, i) in filteredControlledItems" :key="'c-'+i" :class="{ ok: it.status === 'pass', bad: it.status !== 'pass' }">
           <div class="rel">{{ it.rel_path }}</div>
-          <div class="msg">{{ it.status }} · {{ it.message }}</div>
+          <div class="msg">{{ statusLabel(it.status) }} · {{ it.message }}</div>
         </li>
       </ul>
     </section>
@@ -426,11 +437,13 @@ onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } })
       <p>批次 {{ lastReport.batch_id }} · {{ lastReport.mode === "full" ? "完整" : "快速" }}：
         <button type="button" class="stat-filter pass" :class="{ active: batchStatusFilter === 'pass' }" title="筛选：通过（再点取消）" @click="toggleBatchStatusFilter('pass')">通过 <strong>{{ lastReport.passed }}</strong></button>
         <button type="button" class="stat-filter fail" :class="{ active: batchStatusFilter === 'fail' }" title="筛选：失败（再点取消）" @click="toggleBatchStatusFilter('fail')">失败 <strong>{{ lastReport.failed }}</strong></button>
+        <button type="button" class="stat-filter miss" :class="{ active: batchStatusFilter === 'missing' }" title="筛选：缺失（再点取消）" @click="toggleBatchStatusFilter('missing')">缺失 <strong>{{ lastReport.missing }}</strong></button>
+        <button type="button" class="stat-filter err" :class="{ active: batchStatusFilter === 'error' }" title="筛选：错误（再点取消）" @click="toggleBatchStatusFilter('error')">错误 <strong>{{ lastReport.errors }}</strong></button>
       </p>
       <ul class="result-list">
-        <li v-for="(it, i) in filteredBatchItems" :key="'b-'+i" :class="{ ok: it.ok, bad: !it.ok }">
+        <li v-for="(it, i) in filteredBatchItems" :key="'b-'+i" :class="{ ok: it.status === 'pass', bad: it.status !== 'pass' }">
           <div class="rel">{{ it.rel_path }}</div>
-          <div class="msg">{{ it.message }}</div>
+          <div class="msg">{{ statusLabel(it.status) }} · {{ it.message }}</div>
         </li>
       </ul>
     </section>
