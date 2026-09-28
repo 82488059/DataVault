@@ -521,15 +521,15 @@ onMounted(async () => {
   });
   const u6 = await bind("verify-job-finished", (p: VerifyJobFinished) => {
     removeJob(p.job_id);
-const u7 = await bind("dir-counts-update", (p: DirCountUpdate) => {
-    if (p.job_id !== dirCountsJobId.value) return;
-    applyDirCount(p.path, p.controlled_count, p.total_files);
-  });
     statusMsg.value = p.message;
     resetVerifyFilters();
     if (p.controlled) controlledVerify.value = p.controlled;
     if (p.batch) verifyReport.value = p.batch;
     if (!p.ok && !p.cancelled) errorMsg.value = p.message;
+  });
+  const u7 = await bind("dir-counts-update", (p: DirCountUpdate) => {
+    if (p.job_id !== dirCountsJobId.value) return;
+    applyDirCount(p.path, p.controlled_count, p.total_files);
   });
   unlisteners = [u1, u2, u3, u4, u5, u6, u7];
 });
