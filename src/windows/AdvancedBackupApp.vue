@@ -21,33 +21,16 @@ interface BackupJobFinished {
   job_id: string; kind: string; ok: boolean; cancelled: boolean;
   message: string; batch: BackupBatch | null;
 }
+interface DirCountUpdate {
+  job_id: number; path: string; controlled_count: number; total_files: number;
+}
 
 const srcPath = ref("");
 const dstPath = ref("");
 const srcEntries = ref<DirEntry[]>([]);
-
-interface DirCountUpdate {
-  job_id: number; path: string; controlled_count: number; total_files: number;
-}
-const dirCountsJobId = ref(0);
-function applyDirCount(path: string, controlled_count: number, total_files: number) {
-  const list = srcEntries.value;
-  const i = list.findIndex((e) => e.path === path);
-  if (i < 0) return;
-  const next = list.slice();
-  next[i] = { ...next[i], controlled_count, total_files };
-  srcEntries.value = next;
-    void requestDirFileCounts(srcEntries.value);
-}
-async function requestDirFileCounts(list: DirEntry[]) {
-  const paths = list.filter((e) => e.is_dir && e.is_controlled).map((e) => e.path);
-  if (!paths.length) { dirCountsJobId.value = 0; return; }
-  try { dirCountsJobId.value = await invoke<number>("start_dir_file_counts", { paths }); } catch { /* ignore */ }
-}
-
 const dstEntries = ref<DirEntry[]>([]);
 const srcSelected = ref<Set<string>>(new Set());
-const dstSelected = ref<string>(""); // single path
+const dstSelected = ref<string>("");
 const backupRoots = ref<Set<string>>(new Set());
 const errorMsg = ref("");
 const statusMsg = ref("");
@@ -56,13 +39,29 @@ const lastBatch = ref<BackupBatch | null>(null);
 const busy = ref(false);
 const batchName = ref("");
 const unlisteners: UnlistenFn[] = [];
+const dirCountsJobId = ref(0);
 
 function normDrive(p: string): string {
   const m = (p || "").match(/^([A-Za-z]:)/);
   return m ? m[1].toUpperCase() + "\\" : "";
 }
+async function refreshBackupRoots() {
+  const drives = await invoke<{ path: string; is_backup_disk: boolean }[]>("list_drives");
+  const next = new Set<string>();
+  for (const d of drives) {
+    if (d.is_backup_disk) next.add(normDrive(d.path) || d.path.toUpperCase());
+  }
+  backupRoots.value = next;
+}
+function isControlledDrive(p: string): boolean {
+  const d = normDrive(p);
+  return !!d && backupRoots.value.has(d);
+}
 function isDriveRoot(p: string): boolean {
   return /^[A-Za-z]:[\\/]?$/.test((p || "").trim());
+}
+function isFolderEntry(e: DirEntry): boolean {
+  return e.is_dir || e.is_backup_disk || isDriveRoot(e.path);
 }
 function formatSize(n: number | null | undefined): string {
   if (n == null || typeof n !== "number" || !Number.isFinite(n) || n < 0) return "-";
@@ -71,71 +70,92 @@ function formatSize(n: number | null | undefined): string {
   if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
   return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
 }
-
-const canBackup = computed(() => srcSelected.value.size > 0 && !!dstSelected.value && !busy.value);
-
-async function refreshBackupRoots() {
-  const drives = await invoke<{ path: string; is_backup_disk: boolean }[]>("list_drives");
-  const next = new Set<string>();
-  for (const d of drives) if (d.is_backup_disk) next.add(d.path.toUpperCase());
-  backupRoots.value = next;
+function pathKey(p: string): string {
+  return (p || "").replace(/\//g, "\\").replace(/[\\/]+$/, "").toUpperCase();
 }
+function isDstSelected(p: string): boolean {
+  return !!dstSelected.value && pathKey(dstSelected.value) === pathKey(p);
+}
+
+function applyDirCount(path: string, controlled_count: number, total_files: number) {
+  const si = srcEntries.value.findIndex((e) => e.path === path);
+  if (si >= 0) {
+    const next = srcEntries.value.slice();
+    next[si] = { ...next[si], controlled_count, total_files };
+    srcEntries.value = next;
+  }
+  const di = dstEntries.value.findIndex((e) => e.path === path);
+  if (di >= 0) {
+    const next = dstEntries.value.slice();
+    next[di] = { ...next[di], controlled_count, total_files };
+    dstEntries.value = next;
+  }
+}
+async function requestDirFileCounts(list: DirEntry[]) {
+  const paths = list.filter((e) => e.is_dir && e.is_controlled).map((e) => e.path);
+  if (!paths.length) { dirCountsJobId.value = 0; return; }
+  try { dirCountsJobId.value = await invoke<number>("start_dir_file_counts", { paths }); } catch { /* ignore */ }
+}
+
+const sameDriveConflict = computed(() => {
+  if (!dstSelected.value || srcSelected.value.size === 0) return false;
+  const dd = normDrive(dstSelected.value);
+  if (!dd) return false;
+  for (const s of srcSelected.value) {
+    if (normDrive(s) === dd) return true;
+  }
+  return false;
+});
+const canBackup = computed(
+  () => srcSelected.value.size > 0 && !!dstSelected.value && !busy.value && !sameDriveConflict.value,
+);
 
 async function loadSrc(path: string) {
   errorMsg.value = "";
   try {
     if (!path) {
-      const drives = await invoke<DirEntry[]>("list_drives");
-      // Source pane: exclude already-marked backup disks (dest side only).
-      srcEntries.value = drives.filter((d) => !d.is_backup_disk);
-    void requestDirFileCounts(srcEntries.value);
+      srcEntries.value = await invoke<DirEntry[]>("list_drives");
     } else {
       const raw = await invoke<DirEntry[]>("list_dir", { path });
       srcEntries.value = raw.filter((e) => e.name.toLowerCase() !== ".datavault");
     }
     srcPath.value = path;
     srcSelected.value = new Set();
+    void requestDirFileCounts(srcEntries.value);
   } catch (e) { errorMsg.value = String(e); }
 }
 
-/** Destination: at root only show backup disks; inside only under backup disks. */
 async function loadDst(path: string) {
   errorMsg.value = "";
   try {
-    await refreshBackupRoots();
     if (!path) {
-      const drives = await invoke<DirEntry[]>("list_drives");
-      dstEntries.value = drives.filter((d) => d.is_backup_disk);
+      dstEntries.value = await invoke<DirEntry[]>("list_drives");
       dstPath.value = "";
       dstSelected.value = "";
-      return;
-    }
-    const drive = normDrive(path);
-    if (!drive || ![...backupRoots.value].some((r) => r === drive || r.startsWith(drive))) {
-      errorMsg.value = "目标只能选择已标记的受控盘或其子目录";
+      void requestDirFileCounts(dstEntries.value);
       return;
     }
     const raw = await invoke<DirEntry[]>("list_dir", { path });
-    dstEntries.value = raw.filter((e) => e.is_dir && e.name.toLowerCase() !== ".datavault");
+    dstEntries.value = raw.filter((e) => e.name.toLowerCase() !== ".datavault");
     dstPath.value = path;
-    // keep selection if still under this tree; else clear / default to current folder
     if (dstSelected.value) {
-      const sel = dstSelected.value.replace(/\//g, "\\").toUpperCase();
-      const cur = path.replace(/\//g, "\\").toUpperCase();
-      if (!sel.startsWith(cur.replace(/\\$/, "") ) && sel !== cur && sel !== cur + "\\") {
+      const sel = pathKey(dstSelected.value);
+      const cur = pathKey(path);
+      if (sel !== cur && !sel.startsWith(cur + "\\")) {
         dstSelected.value = path.endsWith("\\") || path.endsWith("/") ? path : path + "\\";
       }
     } else {
       dstSelected.value = path.endsWith("\\") || path.endsWith("/") ? path : path + "\\";
     }
+    void requestDirFileCounts(dstEntries.value);
   } catch (e) { errorMsg.value = String(e); }
 }
 
 function openSrc(e: DirEntry) {
-  if (e.is_dir || e.is_backup_disk || isDriveRoot(e.path)) void loadSrc(e.path);
+  if (isFolderEntry(e)) void loadSrc(e.path);
 }
 function openDst(e: DirEntry) {
-  if (e.is_dir || e.is_backup_disk || isDriveRoot(e.path)) void loadDst(e.path);
+  if (isFolderEntry(e)) void loadDst(e.path);
 }
 
 function srcUp() {
@@ -153,8 +173,7 @@ function dstUp() {
   else {
     const p = dstPath.value.replace(/[\\/]+$/, "");
     const i = Math.max(p.lastIndexOf("\\"), p.lastIndexOf("/"));
-    const parent = i > 0 ? p.slice(0, i + 1) : "";
-    void loadDst(parent);
+    void loadDst(i > 0 ? p.slice(0, i + 1) : "");
   }
 }
 
@@ -169,16 +188,10 @@ function selectSrcAll() {
 function clearSrc() { srcSelected.value = new Set(); }
 
 function pickDst(e: DirEntry) {
-  // single-select: directories (or drive root) only
-  if (!(e.is_dir || e.is_backup_disk || isDriveRoot(e.path))) return;
-  const drive = normDrive(e.path);
-  if (![...backupRoots.value].some((r) => r === drive)) {
-    errorMsg.value = "目标必须是受控盘或其子目录";
-    return;
-  }
-  dstSelected.value = e.path.endsWith("\\") || e.path.endsWith("/") ? e.path : (e.is_dir || isDriveRoot(e.path) ? e.path + (e.path.includes("/") ? "/" : "\\") : e.path);
-  // normalize trailing
+  if (!isFolderEntry(e)) return;
   if (isDriveRoot(e.path)) dstSelected.value = normDrive(e.path);
+  else if (e.path.endsWith("\\") || e.path.endsWith("/")) dstSelected.value = e.path;
+  else dstSelected.value = e.path + (e.path.includes("/") ? "/" : "\\");
 }
 
 async function doBackup() {
@@ -186,10 +199,31 @@ async function doBackup() {
   const sources = Array.from(srcSelected.value);
   const dest = dstSelected.value.trim();
   if (!sources.length) { errorMsg.value = "请在左侧勾选备份源"; return; }
-  if (!dest) { errorMsg.value = "请在右侧单选备份目标（受控盘或子目录）"; return; }
-  const drive = normDrive(dest);
-  if (![...backupRoots.value].some((r) => r === drive)) {
-    errorMsg.value = "目标必须位于已标记的受控盘"; return;
+  if (!dest) { errorMsg.value = "请在右侧单选备份目标文件夹"; return; }
+  const dd = normDrive(dest);
+  for (const s of sources) {
+    if (dd && normDrive(s) === dd) {
+      errorMsg.value = "源与目标不能在同一盘符，请选择不同盘符";
+      return;
+    }
+  }
+  try { await refreshBackupRoots(); } catch { /* ignore */ }
+  if (dd && !isControlledDrive(dest)) {
+    const ok = window.confirm(
+      `目标盘「${dd}」尚未标记为受控。\n\n确认标记为 DataVault 受控盘并继续备份？\n将在该盘根目录创建 .datavault 元数据目录。`
+    );
+    if (!ok) { statusMsg.value = "已取消"; return; }
+    busy.value = true;
+    try {
+      statusMsg.value = "正在标记受控盘…";
+      await invoke("mark_backup_disk", { drive: dd });
+      await refreshBackupRoots();
+      statusMsg.value = `已标记受控盘：${dd}`;
+    } catch (e) {
+      errorMsg.value = String(e); statusMsg.value = ""; return;
+    } finally {
+      busy.value = false;
+    }
   }
   busy.value = true;
   try {
@@ -204,7 +238,7 @@ async function doBackup() {
 }
 
 onMounted(async () => {
-  await refreshBackupRoots();
+  try { await refreshBackupRoots(); } catch { /* ignore */ }
   await loadSrc("");
   await loadDst("");
   const bind = async (ev: string, fn: (p: any) => void) => {
@@ -229,12 +263,13 @@ onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } })
     <header class="header">
       <div>
         <h1>高级备份 <span class="sub">DataVault</span></h1>
-        <p class="hint">左侧多选源（不含已标记受控盘）；右侧仅可单选受控盘或其子目录作为目标。</p>
+        <p class="hint">左侧多选源（含全部盘符）；右侧浏览全部文件/文件夹，仅可单选文件夹作为目标。源与目标不可同一盘符。</p>
       </div>
-      <button class="btn primary" title="将左侧勾选复制到右侧所选目标" :disabled="!canBackup" @click="doBackup">开始备份</button>
+      <button class="btn primary" title="将左侧勾选复制到右侧所选目标文件夹" :disabled="!canBackup" @click="doBackup">开始备份</button>
     </header>
 
     <p v-if="errorMsg" class="banner error">{{ errorMsg }}</p>
+    <p v-if="sameDriveConflict" class="banner error">源与目标在同一盘符，请更换目标或取消同盘源项。</p>
     <p v-if="statusMsg" class="banner ok">{{ statusMsg }}</p>
     <div v-if="progress" class="banner progress">
       <div class="progress-meta">
@@ -272,11 +307,11 @@ onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } })
             <tbody>
               <tr v-for="e in srcEntries" :key="'s-'+e.path" :class="{ selected: srcSelected.has(e.path) }" @dblclick="openSrc(e)">
                 <td @click.stop><input type="checkbox" :checked="srcSelected.has(e.path)" @change="toggleSrc(e.path)" /></td>
-                <td class="name" @click="(e.is_dir || e.is_backup_disk || isDriveRoot(e.path)) ? openSrc(e) : toggleSrc(e.path)">
-                  <span class="icon" aria-hidden="true">{{ (e.is_dir || e.is_backup_disk || isDriveRoot(e.path)) ? "📁" : "📄" }}</span>{{ e.name || e.path }}
+                <td class="name" @click="isFolderEntry(e) ? openSrc(e) : toggleSrc(e.path)">
+                  <span class="icon" aria-hidden="true">{{ isFolderEntry(e) ? "📁" : "📄" }}</span>{{ e.name || e.path }}
                 </td>
-                <td>{{ e.is_dir || e.is_backup_disk || isDriveRoot(e.path) ? "文件夹" : "文件" }}</td>
-                <td>{{ e.is_dir || e.is_backup_disk || isDriveRoot(e.path) ? "—" : formatSize(e.size) }}</td>
+                <td>{{ isFolderEntry(e) ? "文件夹" : "文件" }}</td>
+                <td>{{ isFolderEntry(e) ? "—" : formatSize(e.size) }}</td>
                 <td>
                   <span v-if="e.is_controlled" class="badge controlled" title="已在 vault.db 登记">受控</span>
                 </td>
@@ -291,37 +326,46 @@ onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } })
       </section>
 
       <section class="panel pane">
-        <h2>目标（单选 · 仅受控盘）</h2>
+        <h2>目标（单选文件夹）</h2>
         <div class="toolbar">
           <button class="btn small" :disabled="!dstPath" @click="dstUp">上级</button>
-          <button class="btn small" @click="loadDst('')">受控盘符</button>
+          <button class="btn small" @click="loadDst('')">盘符</button>
           <span class="muted">{{ dstSelected ? "已选 " + dstSelected : "未选目标" }}</span>
         </div>
-        <code class="path">{{ dstPath || "受控盘列表" }}</code>
+        <code class="path">{{ dstPath || "此电脑（盘符）" }}</code>
         <div class="table-wrap">
           <table>
             <thead>
               <tr>
                 <th style="width:36px"></th><th>名称</th><th style="width:70px">类型</th>
+                <th style="width:90px">大小</th><th style="width:60px">受控</th><th style="width:90px">数量</th>
               </tr>
             </thead>
             <tbody>
               <tr v-for="e in dstEntries" :key="'d-'+e.path"
-                :class="{ selected: dstSelected.replace(/[\\/]+$/, '').toUpperCase() === e.path.replace(/[\\/]+$/, '').toUpperCase() }"
+                :class="{ selected: isDstSelected(e.path), disabled: !isFolderEntry(e) }"
                 @dblclick="openDst(e)">
                 <td @click.stop>
-                  <input type="radio" name="dst" :checked="dstSelected.replace(/[\\/]+$/, '').toUpperCase() === e.path.replace(/[\\/]+$/, '').toUpperCase()" @change="pickDst(e)" />
+                  <input type="radio" name="dst" :disabled="!isFolderEntry(e)"
+                    :checked="isDstSelected(e.path)" @change="pickDst(e)" />
                 </td>
-                <td class="name" @click="openDst(e)">
-                  <span class="icon" aria-hidden="true">📁</span>{{ e.name || e.path }}
+                <td class="name" @click="isFolderEntry(e) ? openDst(e) : undefined">
+                  <span class="icon" aria-hidden="true">{{ isFolderEntry(e) ? "📁" : "📄" }}</span>{{ e.name || e.path }}
                 </td>
-                <td>文件夹</td>
+                <td>{{ isFolderEntry(e) ? "文件夹" : "文件" }}</td>
+                <td>{{ isFolderEntry(e) ? "—" : formatSize(e.size) }}</td>
+                <td>
+                  <span v-if="e.is_controlled" class="badge controlled" title="已在 vault.db 登记">受控</span>
+                </td>
+                <td>
+                  <span v-if="e.is_dir && e.is_controlled" title="受控文件数/总文件数">{{ e.controlled_count != null && e.total_files != null ? e.controlled_count + '/' + e.total_files : '…' }}</span>
+                </td>
               </tr>
               <tr v-if="!dstEntries.length && !dstPath">
-                <td colspan="3" class="muted center">无可用受控盘。请先在主窗口「标记为受控」。</td>
+                <td colspan="6" class="muted center">无可用盘符</td>
               </tr>
               <tr v-if="!dstEntries.length && dstPath" class="selected dest-here-row">
-                <td colspan="3" class="muted center dest-here">
+                <td colspan="6" class="muted center dest-here">
                   <div>备份到此目录（当前为空）</div>
                   <strong class="dest-path">{{ dstSelected || dstPath }}</strong>
                 </td>
@@ -364,6 +408,7 @@ table { width:100%; border-collapse:collapse; font-size:0.88rem; }
 th, td { padding:7px 9px; text-align:left; border-bottom:1px solid #243041; }
 th { background:#1c2430; color:#9aa7b8; font-weight:600; position:sticky; top:0; }
 tr.selected { background:#1e2a40; } tr:hover { background:#1a222e; }
+tr.disabled { opacity:0.75; }
 .name { cursor:pointer; user-select:none; } .icon { margin-right:6px; }
 .btn { background:#243044; color:#e7ecf3; border:1px solid #3a4a63; border-radius:8px; padding:8px 12px; cursor:pointer; font-size:0.85rem; }
 .btn:disabled { opacity:0.45; cursor:not-allowed; }
