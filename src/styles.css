@@ -10,3 +10,38 @@ html, body, #app {
   padding: 0;
   min-height: 100%;
 }
+
+/* Thin muted scrollbars for scrolling list panes (explorer, verify details, advanced). */
+.table-wrap,
+.result-list,
+.batch-combo-list,
+.scroll-thin {
+  scrollbar-width: thin;
+  scrollbar-color: #3a4a63 transparent;
+}
+.table-wrap::-webkit-scrollbar,
+.result-list::-webkit-scrollbar,
+.batch-combo-list::-webkit-scrollbar,
+.scroll-thin::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.table-wrap::-webkit-scrollbar-track,
+.result-list::-webkit-scrollbar-track,
+.batch-combo-list::-webkit-scrollbar-track,
+.scroll-thin::-webkit-scrollbar-track {
+  background: transparent;
+}
+.table-wrap::-webkit-scrollbar-thumb,
+.result-list::-webkit-scrollbar-thumb,
+.batch-combo-list::-webkit-scrollbar-thumb,
+.scroll-thin::-webkit-scrollbar-thumb {
+  background: #3a4a63;
+  border-radius: 999px;
+}
+.table-wrap::-webkit-scrollbar-thumb:hover,
+.result-list::-webkit-scrollbar-thumb:hover,
+.batch-combo-list::-webkit-scrollbar-thumb:hover,
+.scroll-thin::-webkit-scrollbar-thumb:hover {
+  background: #4a5a73;
+}

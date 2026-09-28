@@ -645,7 +645,7 @@ onUnmounted(() => { for (const u of unlisteners) u(); unlisteners = []; });
 </template>
 
 <style scoped>
-.app { min-height:100vh; height:100vh; overflow-x:hidden; overflow-y:auto; background:#0f1419; color:#e7ecf3; font-family:"Segoe UI","Microsoft YaHei",system-ui,sans-serif; padding:12px 16px 12px; box-sizing:border-box; display:flex; flex-direction:column; gap:8px; }
+.app { min-height:100vh; height:100vh; overflow-x:hidden; overflow-y:auto; scrollbar-width:thin; scrollbar-color:#3a4a63 transparent; background:#0f1419; color:#e7ecf3; font-family:"Segoe UI","Microsoft YaHei",system-ui,sans-serif; padding:12px 16px 12px; box-sizing:border-box; display:flex; flex-direction:column; gap:8px; }
 .header { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; }
 h1 { margin:0; font-size:1.35rem; font-weight:700; }
 .sub { color:#7aa2ff; font-weight:500; font-size:0.95rem; }

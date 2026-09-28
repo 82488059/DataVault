@@ -411,7 +411,9 @@ tr.selected { background:#1e2a40; } tr:hover { background:#1a222e; }
 .badge { font-size:0.72rem; background:#2f5bff; padding:2px 8px; border-radius:999px; margin-left:6px; }
 .badge.backup { background:#1f6b45; margin-left:0; }
 .badge.controlled { background:#5b3db8; margin-left:0; }
-.results { flex-shrink:0; max-height:min(200px, 24vh); overflow:auto; }
+.results { flex-shrink:0; max-height:min(220px, 24vh); overflow:hidden; display:flex; flex-direction:column; min-height:0; }
+.results .verify-summary, .results .result-block { flex:1 1 auto; min-height:0; display:flex; flex-direction:column; overflow:hidden; }
+.results .result-list { flex:1 1 auto; min-height:0; max-height:140px; overflow:auto; }
 .result-list { list-style:none; margin:0; padding:0; }
 .result-list li { padding:8px; border-radius:8px; margin-bottom:6px; border:1px solid #2a3442; font-size:0.78rem; }
 .result-list li.ok { border-color:#2d6a45; background:#122018; }
