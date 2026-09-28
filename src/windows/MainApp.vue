@@ -70,6 +70,7 @@ const busy = ref(false);
 const activeJobs = ref<ActiveJob[]>([]);
 
 const destPath = ref("");
+const batchName = ref("");
 const sources = ref<string[]>([]);
 const lastBatch = ref<BackupBatch | null>(null);
 const batchIds = ref<string[]>([]);
@@ -279,7 +280,7 @@ async function doBackup() {
   if (!destPath.value.trim()) { errorMsg.value = "请填写备份目标目录"; return; }
   try {
     statusMsg.value = "已启动后台备份…";
-    const start = await invoke<JobStart>("start_backup", { sources: src, dest: destPath.value.trim() });
+    const start = await invoke<JobStart>("start_backup", { sources: src, dest: destPath.value.trim(), batchName: batchName.value.trim() || null });
     upsertJob({ job_id: start.job_id, kind: start.kind, phase: "copying", message: "开始备份…" });
     statusMsg.value = `备份任务 ${start.job_id} 已开始（可与其它任务并行）`;
   } catch (e) { errorMsg.value = String(e); statusMsg.value = ""; }
@@ -562,6 +563,9 @@ onUnmounted(() => { for (const u of unlisteners) u(); unlisteners = []; });
               <button class="btn tiny" title="移除" @click="removeSource(s)">×</button></li>
             <li v-if="!sources.length" class="muted">可勾选后「设为备份源」，或直接勾选后开始备份</li>
           </ul>
+          <label class="field"><span>批次名称（可选，默认年月日时分秒）</span>
+            <input v-model="batchName" type="text" placeholder="例如 项目A-全量" title="留空则使用本地时间 YYYYMMDDHHmmss 作为批次号" />
+          </label>
           <label class="field"><span>目标目录</span>
             <input v-model="destPath" type="text" placeholder="例如 E:\Backup\DataVault" title="备份复制到此目录" />
           </label>

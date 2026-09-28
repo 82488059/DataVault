@@ -3,6 +3,10 @@ import { computed, onMounted, onUnmounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
+interface DirEntry {
+  name: string; path: string; is_dir: boolean; size: number;
+  is_backup_disk: boolean; is_controlled: boolean;
+}
 interface FileMeta {
   rel_path: string; src_path: string; dest_path: string;
   size: number; mtime: number; quick_md5?: string; error: string | null;
@@ -26,9 +30,18 @@ interface VerifyItem {
 interface VerifyReport {
   batch_id: string; mode: string; items: VerifyItem[]; passed: number; failed: number;
 }
+interface ControlledVerifyItem {
+  rel_path: string; status: string; message: string;
+  expected: string | null; actual: string | null;
+  size_changed: boolean; mtime_changed: boolean;
+}
+interface ControlledVerifyReport {
+  drive_root: string; mode: string; items: ControlledVerifyItem[];
+  passed: number; failed: number; missing: number; errors: number;
+}
 interface VerifyJobFinished {
   job_id: string; kind: string; ok: boolean; cancelled: boolean; message: string;
-  controlled: unknown; batch: VerifyReport | null;
+  controlled: ControlledVerifyReport | null; batch: VerifyReport | null;
 }
 
 const rows = ref<BatchRow[]>([]);
@@ -38,14 +51,30 @@ const errorMsg = ref("");
 const statusMsg = ref("");
 const progress = ref<JobProgress | null>(null);
 const lastReport = ref<VerifyReport | null>(null);
+const controlledReport = ref<ControlledVerifyReport | null>(null);
 const unlisteners: UnlistenFn[] = [];
+
+const dirPath = ref("");
+const dirEntries = ref<DirEntry[]>([]);
+const dirSelected = ref<Set<string>>(new Set());
 
 function driveOf(dest: string): string {
   const m = (dest || "").match(/^([A-Za-z]:)/);
   return m ? m[1].toUpperCase() + "\\" : (dest || "—");
 }
-
-/** Prefer YYYYMMDDHHmmss id → readable local time; else created_at. */
+function normDrive(p: string): string {
+  const m = (p || "").match(/^([A-Za-z]:)/);
+  return m ? m[1].toUpperCase() + "\\" : "";
+}
+function isDriveRoot(p: string): boolean {
+  return /^[A-Za-z]:[\\/]?$/.test((p || "").trim());
+}
+function formatSize(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
 function timeOf(b: BackupBatch): string {
   const id = (b.id || "").trim();
   if (/^\d{14}$/.test(id)) {
@@ -63,6 +92,8 @@ function timeOf(b: BackupBatch): string {
 }
 
 const hasSelection = computed(() => selected.value.size > 0);
+const hasDirSelection = computed(() => dirSelected.value.size > 0);
+const dirPathLabel = computed(() => dirPath.value || "备份盘列表");
 
 async function refresh() {
   errorMsg.value = "";
@@ -73,23 +104,16 @@ async function refresh() {
       try {
         const b = await invoke<BackupBatch>("load_batch", { batchId: id });
         next.push({
-          id: b.id,
-          timeLabel: timeOf(b),
-          fileCount: b.files?.length ?? 0,
-          drive: driveOf(b.destination_root),
-          raw: b,
+          id: b.id, timeLabel: timeOf(b), fileCount: b.files?.length ?? 0,
+          drive: driveOf(b.destination_root), raw: b,
         });
-      } catch {
-        /* skip broken */
-      }
+      } catch { /* skip */ }
     }
     rows.value = next;
     const keep = new Set<string>();
     for (const id of selected.value) if (next.some((r) => r.id === id)) keep.add(id);
     selected.value = keep;
-  } catch (e) {
-    errorMsg.value = String(e);
-  }
+  } catch (e) { errorMsg.value = String(e); }
 }
 
 function toggle(id: string) {
@@ -97,10 +121,79 @@ function toggle(id: string) {
   if (next.has(id)) next.delete(id); else next.add(id);
   selected.value = next;
 }
-
 function toggleAll() {
   if (selected.value.size === rows.value.length) selected.value = new Set();
   else selected.value = new Set(rows.value.map((r) => r.id));
+}
+
+async function loadDir(path: string) {
+  errorMsg.value = "";
+  try {
+    if (!path) {
+      const drives = await invoke<DirEntry[]>("list_drives");
+      // Only already-marked backup disks
+      dirEntries.value = drives.filter((d) => d.is_backup_disk);
+    } else {
+      const raw = await invoke<DirEntry[]>("list_dir", { path });
+      // Only controlled files / dirs containing controlled paths
+      dirEntries.value = raw.filter(
+        (e) => e.name.toLowerCase() !== ".datavault" && e.is_controlled,
+      );
+    }
+    dirPath.value = path;
+    dirSelected.value = new Set();
+  } catch (e) { errorMsg.value = String(e); }
+}
+
+function openDirEntry(e: DirEntry) {
+  if (e.is_dir || e.is_backup_disk || isDriveRoot(e.path)) void loadDir(e.path);
+}
+function dirUp() {
+  if (!dirPath.value) return;
+  if (isDriveRoot(dirPath.value)) void loadDir("");
+  else {
+    const p = dirPath.value.replace(/[\\/]+$/, "");
+    const i = Math.max(p.lastIndexOf("\\"), p.lastIndexOf("/"));
+    void loadDir(i > 0 ? p.slice(0, i + 1) : "");
+  }
+}
+function toggleDir(path: string) {
+  const next = new Set(dirSelected.value);
+  if (next.has(path)) next.delete(path); else next.add(path);
+  dirSelected.value = next;
+}
+function selectDirAll() { dirSelected.value = new Set(dirEntries.value.map((e) => e.path)); }
+function clearDirSel() { dirSelected.value = new Set(); }
+
+function resolveDirDrive(): string {
+  if (dirPath.value) return normDrive(dirPath.value);
+  const drives = new Set<string>();
+  for (const p of dirSelected.value) {
+    const d = normDrive(p);
+    if (d) drives.add(d);
+  }
+  if (drives.size === 1) return Array.from(drives)[0];
+  return "";
+}
+
+async function doVerifyDir(mode: "full" | "quick") {
+  errorMsg.value = ""; statusMsg.value = ""; controlledReport.value = null;
+  const sel = Array.from(dirSelected.value);
+  if (!sel.length) { errorMsg.value = "请先在目录列表勾选要校验的目录或文件"; return; }
+  const drive = resolveDirDrive();
+  if (!drive) { errorMsg.value = "请勾选同一备份盘下的路径，或先进入该备份盘"; return; }
+  for (const p of sel) {
+    if (normDrive(p) !== drive) { errorMsg.value = "勾选的路径须属于同一备份盘"; return; }
+  }
+  busy.value = true;
+  try {
+    statusMsg.value = mode === "full" ? "按目录完整校验进行中…" : "按目录快速校验进行中…";
+    const start = await invoke<JobStart>("start_verify_controlled", {
+      drive, mode, relPaths: null, paths: sel,
+    });
+    statusMsg.value = `目录校验 ${start.job_id} 已开始（可与批次校验并行）`;
+  } catch (e) { errorMsg.value = String(e); statusMsg.value = ""; }
+  finally { busy.value = false; }
 }
 
 async function doVerify(mode: "full" | "quick") {
@@ -116,29 +209,25 @@ async function doVerify(mode: "full" | "quick") {
       const start = await invoke<JobStart>("start_verify_backup", { batchId, mode });
       statusMsg.value = `批次校验 ${start.job_id} 已开始（可并行）`;
     }
-  } catch (e) {
-    errorMsg.value = String(e); statusMsg.value = "";
-  } finally {
-    busy.value = false;
-  }
+  } catch (e) { errorMsg.value = String(e); statusMsg.value = ""; }
+  finally { busy.value = false; }
 }
 
 onMounted(async () => {
   await refresh();
+  await loadDir("");
   const bind = async (ev: string, fn: (p: any) => void) => {
     unlisteners.push(await listen(ev, (e) => fn(e.payload)));
   };
-  await bind("verify-job-progress", (p: JobProgress) => {
-    if (p.job_id?.startsWith("batch-") || true) progress.value = p;
-  });
+  await bind("verify-job-progress", (p: JobProgress) => { progress.value = p; });
   await bind("verify-job-finished", (p: VerifyJobFinished) => {
     progress.value = null;
     if (p.batch) lastReport.value = p.batch;
+    if (p.controlled) controlledReport.value = p.controlled;
     statusMsg.value = p.message || (p.ok ? "校验完成" : "校验结束");
     void refresh();
   });
 });
-
 onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } });
 </script>
 
@@ -147,10 +236,10 @@ onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } })
     <header class="header">
       <div>
         <h1>高级校验 <span class="sub">DataVault</span></h1>
-        <p class="hint">勾选批次后执行快速/完整校验。批次号为本地年月日时分秒。</p>
+        <p class="hint">按目录校验受控文件，或勾选备份批次做快/完整校验。仅显示已标记备份盘及受控路径。</p>
       </div>
       <div class="row">
-        <button class="btn small" title="刷新批次列表" @click="refresh">刷新</button>
+        <button class="btn small" title="刷新批次列表" @click="refresh">刷新批次</button>
       </div>
     </header>
 
@@ -168,49 +257,107 @@ onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } })
       <div v-if="progress.message" class="progress-file">{{ progress.message }}</div>
     </div>
 
-    <section class="panel">
-      <div class="toolbar">
-        <button class="btn small" @click="toggleAll">{{ selected.size === rows.length && rows.length ? "清空选择" : "全选" }}</button>
-        <button class="btn small primary" title="对勾选批次做快速校验" :disabled="!hasSelection || busy" @click="doVerify('quick')">快速校验</button>
-        <button class="btn small" title="对勾选批次做完整校验" :disabled="!hasSelection || busy" @click="doVerify('full')">完整校验</button>
-        <span class="muted">已选 {{ selected.size }} / {{ rows.length }}</span>
-      </div>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th style="width:36px"></th>
-              <th>批次号</th>
-              <th style="width:180px">时间</th>
-              <th style="width:80px">文件数</th>
-              <th style="width:90px">盘符</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="r in rows" :key="r.id" :class="{ selected: selected.has(r.id) }" @click="toggle(r.id)">
-              <td @click.stop>
-                <input type="checkbox" :checked="selected.has(r.id)" @change="toggle(r.id)" />
-              </td>
-              <td class="mono">{{ r.id }}</td>
-              <td>{{ r.timeLabel }}</td>
-              <td>{{ r.fileCount }}</td>
-              <td>{{ r.drive }}</td>
-            </tr>
-            <tr v-if="!rows.length">
-              <td colspan="5" class="muted center">暂无备份批次。请在主窗口完成备份后再查看。</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
+    <div class="panes">
+      <section class="panel pane">
+        <h2>按目录校验（受控）</h2>
+        <p class="muted small">仅列出备份盘及含受控文件的目录/文件。勾选后快速/完整校验对应受控项。</p>
+        <div class="toolbar">
+          <button class="btn small" :disabled="!dirPath" @click="dirUp">上级</button>
+          <button class="btn small" @click="loadDir('')">备份盘符</button>
+          <button class="btn small" @click="selectDirAll">全选</button>
+          <button class="btn small" @click="clearDirSel">清空</button>
+          <button class="btn small primary" title="对勾选路径下受控文件快速校验" :disabled="!hasDirSelection || busy" @click="doVerifyDir('quick')">快速校验</button>
+          <button class="btn small" title="对勾选路径下受控文件完整校验" :disabled="!hasDirSelection || busy" @click="doVerifyDir('full')">完整校验</button>
+          <span class="muted">已选 {{ dirSelected.size }}</span>
+        </div>
+        <code class="path">{{ dirPathLabel }}</code>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th style="width:36px"></th><th>名称</th><th style="width:70px">类型</th>
+                <th style="width:90px">大小</th><th style="width:80px">标记</th><th style="width:60px">受控</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="e in dirEntries" :key="'d-'+e.path" :class="{ selected: dirSelected.has(e.path) }" @dblclick="openDirEntry(e)">
+                <td @click.stop><input type="checkbox" :checked="dirSelected.has(e.path)" @change="toggleDir(e.path)" /></td>
+                <td class="name" @click="(e.is_dir || e.is_backup_disk || isDriveRoot(e.path)) ? openDirEntry(e) : toggleDir(e.path)">
+                  <span class="icon" aria-hidden="true">{{ (e.is_dir || e.is_backup_disk || isDriveRoot(e.path)) ? "📁" : "📄" }}</span>{{ e.name || e.path }}
+                </td>
+                <td>{{ e.is_dir || e.is_backup_disk ? "文件夹" : "文件" }}</td>
+                <td>{{ e.is_dir || e.is_backup_disk ? "—" : formatSize(e.size) }}</td>
+                <td><span v-if="e.is_backup_disk" class="badge backup">备份盘</span></td>
+                <td><span v-if="e.is_controlled" class="badge controlled" title="已在 vault.db 登记">受控</span></td>
+              </tr>
+              <tr v-if="!dirEntries.length">
+                <td colspan="6" class="muted center">{{ dirPath ? "此目录下无受控项" : "无备份盘。请先在主窗口「标记为备份盘」。" }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel pane">
+        <h2>按批次校验</h2>
+        <p class="muted small">勾选备份批次后执行快/完整校验。批次号为名称或本地年月日时分秒。</p>
+        <div class="toolbar">
+          <button class="btn small" @click="toggleAll">{{ selected.size === rows.length && rows.length ? "清空选择" : "全选" }}</button>
+          <button class="btn small primary" title="对勾选批次做快速校验" :disabled="!hasSelection || busy" @click="doVerify('quick')">快速校验</button>
+          <button class="btn small" title="对勾选批次做完整校验" :disabled="!hasSelection || busy" @click="doVerify('full')">完整校验</button>
+          <span class="muted">已选 {{ selected.size }} / {{ rows.length }}</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th style="width:36px"></th>
+                <th>批次号</th>
+                <th style="width:160px">时间</th>
+                <th style="width:70px">文件数</th>
+                <th style="width:80px">盘符</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="r in rows" :key="r.id" :class="{ selected: selected.has(r.id) }">
+                <td @click.stop>
+                  <input type="checkbox" :checked="selected.has(r.id)" @change="toggle(r.id)" />
+                </td>
+                <td class="mono name" @click="toggle(r.id)">{{ r.id }}</td>
+                <td>{{ r.timeLabel }}</td>
+                <td>{{ r.fileCount }}</td>
+                <td>{{ r.drive }}</td>
+              </tr>
+              <tr v-if="!rows.length">
+                <td colspan="5" class="muted center">暂无备份批次。请在主窗口完成备份后再查看。</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+
+    <section v-if="controlledReport" class="panel results">
+      <h2>目录校验结果</h2>
+      <p>受控 · {{ controlledReport.drive_root }} · {{ controlledReport.mode === "full" ? "完整" : "快速" }}：通过
+        <strong class="pass">{{ controlledReport.passed }}</strong> / 失败
+        <strong class="fail">{{ controlledReport.failed }}</strong> / 缺失
+        {{ controlledReport.missing }} / 错误 {{ controlledReport.errors }}</p>
+      <ul class="result-list">
+        <li v-for="(it, i) in controlledReport.items" :key="'c-'+i" :class="{ ok: it.status === 'pass', bad: it.status !== 'pass' }">
+          <div class="rel">{{ it.rel_path }}</div>
+          <div class="msg">{{ it.status }} · {{ it.message }}</div>
+        </li>
+      </ul>
     </section>
 
     <section v-if="lastReport" class="panel results">
-      <h2>最近校验结果</h2>
+      <h2>批次校验结果</h2>
       <p>批次 {{ lastReport.batch_id }} · {{ lastReport.mode === "full" ? "完整" : "快速" }}：通过
         <strong class="pass">{{ lastReport.passed }}</strong> / 失败
         <strong class="fail">{{ lastReport.failed }}</strong></p>
       <ul class="result-list">
-        <li v-for="(it, i) in lastReport.items" :key="i" :class="{ ok: it.ok, bad: !it.ok }">
+        <li v-for="(it, i) in lastReport.items" :key="'b-'+i" :class="{ ok: it.ok, bad: !it.ok }">
           <div class="rel">{{ it.rel_path }}</div>
           <div class="msg">{{ it.message }}</div>
         </li>
@@ -220,13 +367,13 @@ onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } })
 </template>
 
 <style scoped>
-.app { min-height:100vh; background:#0f1419; color:#e7ecf3; font-family:"Segoe UI","Microsoft YaHei",system-ui,sans-serif; padding:14px 16px 18px; box-sizing:border-box; display:flex; flex-direction:column; gap:10px; }
-.header { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; }
+.app { min-height:100vh; height:100vh; overflow:hidden; background:#0f1419; color:#e7ecf3; font-family:"Segoe UI","Microsoft YaHei",system-ui,sans-serif; padding:14px 16px 18px; box-sizing:border-box; display:flex; flex-direction:column; gap:10px; }
+.header { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; flex-shrink:0; }
 h1 { margin:0; font-size:1.25rem; font-weight:700; }
-h2 { margin:0 0 8px; font-size:1rem; color:#9db4ff; }
+h2 { margin:0 0 6px; font-size:0.95rem; color:#9db4ff; }
 .sub { color:#7aa2ff; font-weight:500; font-size:0.95rem; }
 .hint { margin:4px 0 0; color:#9aa7b8; font-size:0.85rem; }
-.banner { padding:8px 12px; border-radius:8px; font-size:0.88rem; }
+.banner { padding:8px 12px; border-radius:8px; font-size:0.88rem; flex-shrink:0; }
 .banner.error { background:#3a1515; color:#ffb4b4; border:1px solid #7a2e2e; }
 .banner.ok { background:#14301f; color:#b6f0c8; border:1px solid #2d6a45; }
 .banner.progress { background:#152038; color:#c5d4ff; border:1px solid #2f5bff; }
@@ -234,25 +381,33 @@ h2 { margin:0 0 8px; font-size:1rem; color:#9db4ff; }
 .progress-track { height:8px; background:#0f1419; border-radius:999px; overflow:hidden; }
 .progress-fill { height:100%; background:linear-gradient(90deg,#2f5bff,#6d9bff); }
 .progress-file { margin-top:6px; font-size:0.78rem; color:#9aa7b8; word-break:break-all; }
+.panes { display:grid; grid-template-columns:1fr 1fr; gap:12px; min-height:0; flex:1; }
 .panel { background:#171d25; border:1px solid #2a3442; border-radius:12px; padding:12px; }
-.toolbar { display:flex; gap:8px; align-items:center; margin-bottom:8px; flex-wrap:wrap; }
-.table-wrap { overflow:auto; border:1px solid #2a3442; border-radius:8px; max-height:calc(100vh - 280px); }
+.pane { display:flex; flex-direction:column; min-height:0; overflow:hidden; }
+.toolbar { display:flex; gap:8px; align-items:center; margin-bottom:6px; flex-wrap:wrap; }
+.path { display:block; background:#0f1419; padding:6px 8px; border-radius:6px; border:1px solid #2a3442; font-size:0.8rem; margin-bottom:8px; word-break:break-all; }
+.table-wrap { flex:1; overflow:auto; border:1px solid #2a3442; border-radius:8px; min-height:120px; }
 table { width:100%; border-collapse:collapse; font-size:0.88rem; }
 th, td { padding:7px 9px; text-align:left; border-bottom:1px solid #243041; }
 th { background:#1c2430; color:#9aa7b8; font-weight:600; position:sticky; top:0; }
-tr.selected { background:#1e2a40; } tr:hover { background:#1a222e; cursor:pointer; }
+tr.selected { background:#1e2a40; } tr:hover { background:#1a222e; }
+.name { cursor:pointer; user-select:none; } .icon { margin-right:6px; }
 .mono { font-family:ui-monospace,Consolas,monospace; }
 .btn { background:#243044; color:#e7ecf3; border:1px solid #3a4a63; border-radius:8px; padding:8px 12px; cursor:pointer; font-size:0.85rem; }
 .btn:disabled { opacity:0.45; cursor:not-allowed; }
 .btn.primary { background:#2f5bff; border-color:#2f5bff; font-weight:600; }
 .btn.small { padding:4px 8px; font-size:0.78rem; }
-.muted { color:#9aa7b8; } .center { text-align:center; }
+.muted { color:#9aa7b8; } .small { font-size:0.78rem; } .center { text-align:center; }
 .pass { color:#6dffa0; } .fail { color:#ff8f8f; }
-.results { max-height:220px; overflow:auto; }
+.badge { font-size:0.72rem; background:#2f5bff; padding:2px 8px; border-radius:999px; margin-left:6px; }
+.badge.backup { background:#1f6b45; margin-left:0; }
+.badge.controlled { background:#5b3db8; margin-left:0; }
+.results { flex-shrink:0; max-height:min(200px, 24vh); overflow:auto; }
 .result-list { list-style:none; margin:0; padding:0; }
 .result-list li { padding:8px; border-radius:8px; margin-bottom:6px; border:1px solid #2a3442; font-size:0.78rem; }
 .result-list li.ok { border-color:#2d6a45; background:#122018; }
 .result-list li.bad { border-color:#7a2e2e; background:#201212; }
 .rel { font-weight:600; }
 .row { display:flex; gap:8px; }
+@media (max-width:960px) { .panes { grid-template-columns:1fr; } .app { height:auto; overflow:auto; } }
 </style>

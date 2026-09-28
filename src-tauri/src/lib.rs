@@ -85,6 +85,49 @@ fn metadata_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     Ok(root)
 }
 
+
+/// Sanitize user batch name for use as id / filename.
+fn sanitize_batch_id(s: &str) -> Result<String, String> {
+    let cleaned: String = s
+        .chars()
+        .map(|c| {
+            if matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') || c.is_control() {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let cleaned = cleaned
+        .trim_matches(|c: char| c == '.' || c == ' ' || c == '_')
+        .to_string();
+    if cleaned.is_empty() {
+        return Err("批次名称无效".into());
+    }
+    if cleaned.chars().count() > 120 {
+        return Err("批次名称过长（最多120字符）".into());
+    }
+    Ok(cleaned)
+}
+
+/// Empty name → YYYYMMDDHHmmss; else sanitized name. Collision → name_YYYYMMDDHHmmss.
+fn resolve_batch_id(app: &tauri::AppHandle, batch_name: Option<String>) -> Result<String, String> {
+    let trimmed = batch_name.unwrap_or_default();
+    let trimmed = trimmed.trim();
+    let base = if trimmed.is_empty() {
+        now_id()
+    } else {
+        sanitize_batch_id(trimmed)?
+    };
+    let meta = metadata_root(app)?;
+    let path = meta.join(format!("{base}.json"));
+    if path.exists() {
+        Ok(format!("{base}_{}", now_id()))
+    } else {
+        Ok(base)
+    }
+}
+
 /// Backup batch id: local wall-clock 年月日时分秒, e.g. 20260928160700.
 fn now_id() -> String {
     chrono::Local::now().format("%Y%m%d%H%M%S").to_string()
@@ -403,6 +446,7 @@ fn backup_paths(
     app: tauri::AppHandle,
     sources: Vec<String>,
     dest: String,
+    batch_name: Option<String>,
 ) -> Result<BackupBatch, String> {
     if sources.is_empty() {
         return Err("未选择任何源路径".into());
@@ -413,7 +457,7 @@ fn backup_paths(
     let dest_root = PathBuf::from(&dest);
     fs::create_dir_all(&dest_root).map_err(|e| format!("创建目标目录失败: {e}"))?;
 
-    let batch_id = now_id();
+    let batch_id = resolve_batch_id(&app, batch_name)?;
     let mut files_meta: Vec<FileMeta> = Vec::new();
 
     for src_str in &sources {
@@ -692,6 +736,7 @@ fn start_backup(
     app: tauri::AppHandle,
     sources: Vec<String>,
     dest: String,
+    batch_name: Option<String>,
 ) -> Result<JobStart, String> {
     if sources.is_empty() {
         return Err("未选择任何源路径".into());
@@ -733,7 +778,7 @@ fn start_backup(
                 job::finish_job(&job_id);
                 return;
             }
-            let result = backup_paths(app.clone(), sources, dest);
+            let result = backup_paths(app.clone(), sources, dest, batch_name);
             match result {
                 Ok(batch) => {
                     let cancelled = job::is_cancelled(&cancel);

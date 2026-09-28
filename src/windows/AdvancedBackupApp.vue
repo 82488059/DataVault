@@ -33,6 +33,7 @@ const statusMsg = ref("");
 const progress = ref<JobProgress | null>(null);
 const lastBatch = ref<BackupBatch | null>(null);
 const busy = ref(false);
+const batchName = ref("");
 const unlisteners: UnlistenFn[] = [];
 
 function normDrive(p: string): string {
@@ -170,7 +171,7 @@ async function doBackup() {
   busy.value = true;
   try {
     statusMsg.value = "正在启动备份…";
-    const start = await invoke<JobStart>("start_backup", { sources, dest });
+    const start = await invoke<JobStart>("start_backup", { sources, dest, batchName: batchName.value.trim() || null });
     statusMsg.value = `备份任务 ${start.job_id} 已开始`;
   } catch (e) {
     errorMsg.value = String(e); statusMsg.value = "";
@@ -219,6 +220,9 @@ onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } })
       <div v-if="progress.rel_path || progress.message" class="progress-file">{{ progress.rel_path || progress.message }}</div>
     </div>
 
+    <label class="field batch-name"><span>批次名称（可选，默认年月日时分秒）</span>
+      <input v-model="batchName" type="text" placeholder="例如 项目A-全量" title="留空则使用本地时间 YYYYMMDDHHmmss 作为批次号" />
+    </label>
     <div class="panes">
       <section class="panel pane">
         <h2>源（多选）</h2>
@@ -312,6 +316,9 @@ h2 { margin:0 0 8px; font-size:0.95rem; color:#9db4ff; }
 .progress-track { height:8px; background:#0f1419; border-radius:999px; overflow:hidden; }
 .progress-fill { height:100%; background:linear-gradient(90deg,#2f5bff,#6d9bff); }
 .progress-file { margin-top:6px; font-size:0.78rem; color:#9aa7b8; word-break:break-all; }
+.field { display:flex; flex-direction:column; gap:4px; font-size:0.8rem; color:#9aa7b8; }
+.field input { background:#0f1419; border:1px solid #2a3442; color:#e7ecf3; border-radius:8px; padding:8px 10px; }
+.batch-name { max-width:420px; }
 .panes { display:grid; grid-template-columns:1fr 1fr; gap:12px; min-height:0; flex:1; }
 .panel { background:#171d25; border:1px solid #2a3442; border-radius:12px; padding:12px; display:flex; flex-direction:column; min-height:0; }
 .pane { max-height:calc(100vh - 200px); }
