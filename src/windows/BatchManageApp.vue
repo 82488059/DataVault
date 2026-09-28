@@ -75,7 +75,8 @@ function normDrive(p: string): string {
 function isDriveRoot(p: string): boolean {
   return /^[A-Za-z]:[\\/]?$/.test((p || "").trim());
 }
-function formatSize(n: number): string {
+function formatSize(n: number | null | undefined): string {
+  if (n == null || typeof n !== "number" || !Number.isFinite(n) || n < 0) return "-";
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
   if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
@@ -291,7 +292,7 @@ onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } })
                 <td class="name" @click="(e.is_dir || e.is_backup_disk || isDriveRoot(e.path)) ? openDirEntry(e) : toggleDir(e.path)">
                   <span class="icon" aria-hidden="true">{{ (e.is_dir || e.is_backup_disk || isDriveRoot(e.path)) ? "📁" : "📄" }}</span>{{ e.name || e.path }}
                 </td>
-                <td>{{ e.is_dir || e.is_backup_disk ? "文件夹" : "文件" }}</td>
+                <td>{{ e.is_dir || e.is_backup_disk || isDriveRoot(e.path) ? "文件夹" : "文件" }}</td>
                 <td>{{ e.is_dir || e.is_backup_disk ? "—" : formatSize(e.size) }}</td>
                 <td><span v-if="e.is_backup_disk" class="badge backup">备份盘</span></td>
                 <td><span v-if="e.is_controlled" class="badge controlled" title="已在 vault.db 登记">受控</span></td>

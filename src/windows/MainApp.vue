@@ -96,6 +96,34 @@ function onBatchComboBlur(ev: FocusEvent) {
 }
 const verifyReport = ref<VerifyReport | null>(null);
 const controlledVerify = ref<ControlledVerifyReport | null>(null);
+/** null = show all; otherwise filter detail list by status (toggle on click). */
+type ControlledStatusFilter = "pass" | "fail" | "missing" | "error";
+const controlledStatusFilter = ref<ControlledStatusFilter | null>(null);
+const batchStatusFilter = ref<"pass" | "fail" | null>(null);
+
+const filteredControlledItems = computed(() => {
+  const items = controlledVerify.value?.items ?? [];
+  const f = controlledStatusFilter.value;
+  if (!f) return items;
+  return items.filter((it) => it.status === f);
+});
+const filteredBatchItems = computed(() => {
+  const items = verifyReport.value?.items ?? [];
+  const f = batchStatusFilter.value;
+  if (!f) return items;
+  return items.filter((it) => (f === "pass" ? it.ok : !it.ok));
+});
+
+function toggleControlledStatusFilter(status: ControlledStatusFilter) {
+  controlledStatusFilter.value = controlledStatusFilter.value === status ? null : status;
+}
+function toggleBatchStatusFilter(status: "pass" | "fail") {
+  batchStatusFilter.value = batchStatusFilter.value === status ? null : status;
+}
+function resetVerifyFilters() {
+  controlledStatusFilter.value = null;
+  batchStatusFilter.value = null;
+}
 
 const backupDriveSet = ref<Set<string>>(new Set());
 const currentIsBackup = ref(false);
@@ -175,7 +203,8 @@ const canIndex = computed(() => !!resolveBackupDrive() || !!resolveSelectedDrive
 /** Enable quick/full verify when browsing a backup disk or when a backup drive letter is checked. */
 const canVerifyControlled = computed(() => !!resolveBackupDrive());
 
-function formatSize(n: number): string {
+function formatSize(n: number | null | undefined): string {
+  if (n == null || typeof n !== "number" || !Number.isFinite(n) || n < 0) return "-";
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
   if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
@@ -364,7 +393,7 @@ async function doVerifyControlled(mode: "full" | "quick") {
   const drive = resolveBackupDrive();
   if (!drive) { errorMsg.value = "请先进入已标记的备份盘，或在盘符列表勾选一个备份盘"; return; }
   try {
-    controlledVerify.value = null; verifyReport.value = null;
+    controlledVerify.value = null; verifyReport.value = null; resetVerifyFilters();
     const sel = Array.from(selected.value);
     // At 盘符 list with backup root checked: paths include drive root → backend expands to all controlled.
     // Nothing checked → paths null → verify all controlled files on this backup drive.
@@ -398,7 +427,7 @@ async function doVerifyBatch(mode: "full" | "quick") {
   errorMsg.value = ""; statusMsg.value = "";
   if (!verifyBatchId.value) { errorMsg.value = "请选择要校验的批次"; return; }
   try {
-    controlledVerify.value = null; verifyReport.value = null;
+    controlledVerify.value = null; verifyReport.value = null; resetVerifyFilters();
     statusMsg.value = mode === "full" ? "批次完整校验进行中…" : "批次快速校验进行中…";
     const start = await invoke<JobStart>("start_verify_backup", {
       batchId: verifyBatchId.value, mode,
@@ -468,6 +497,7 @@ onMounted(async () => {
   const u6 = await bind("verify-job-finished", (p: VerifyJobFinished) => {
     removeJob(p.job_id);
     statusMsg.value = p.message;
+    resetVerifyFilters();
     if (p.controlled) controlledVerify.value = p.controlled;
     if (p.batch) verifyReport.value = p.batch;
     if (!p.ok && !p.cancelled) errorMsg.value = p.message;
@@ -538,10 +568,10 @@ onUnmounted(() => { for (const u of unlisteners) u(); unlisteners = []; });
               <tr v-for="e in entries" :key="e.path" :class="{ selected: selected.has(e.path) }" @dblclick="openEntry(e)">
                 <td><input type="checkbox" :checked="selected.has(e.path)" @change="toggleSelect(e.path)" /></td>
                 <td class="name" @click="e.is_dir ? openEntry(e) : toggleSelect(e.path)">
-                  <span class="icon" aria-hidden="true">{{ e.is_dir ? "📁" : "📄" }}</span>{{ e.name }}
+                  <span class="icon" aria-hidden="true">{{ e.is_dir || isDriveRootPath(e.path) ? "📁" : "📄" }}</span>{{ e.name }}
                 </td>
-                <td>{{ e.is_dir ? "文件夹" : "文件" }}</td>
-                <td>{{ e.is_dir ? "—" : formatSize(e.size) }}</td>
+                <td>{{ e.is_dir || isDriveRootPath(e.path) ? "文件夹" : "文件" }}</td>
+                <td>{{ e.is_dir || isDriveRootPath(e.path) ? "—" : formatSize(e.size) }}</td>
                 <td><span v-if="e.is_backup_disk" class="badge backup">备份盘</span></td>
                 <td><span v-if="e.is_controlled" class="badge controlled" title="已在 vault.db 登记">受控</span></td>
               </tr>
@@ -611,14 +641,15 @@ onUnmounted(() => { for (const u of unlisteners) u(); unlisteners = []; });
 
     <section class="panel results-panel" aria-label="校验结果">
       <h2>校验结果</h2>
-      <p class="muted small">结果独立显示在此区域，不与上方浏览 / 操作区混排。</p>
       <div v-if="controlledVerify" class="verify-summary">
-        <p>受控文件 · {{ controlledVerify.mode === "full" ? "完整" : "快速" }}：通过
-          <strong class="pass">{{ controlledVerify.passed }}</strong> / 失败
-          <strong class="fail">{{ controlledVerify.failed }}</strong> / 缺失
-          {{ controlledVerify.missing }} / 错误 {{ controlledVerify.errors }}</p>
+        <p>受控文件 · {{ controlledVerify.mode === "full" ? "完整" : "快速" }}：
+          <button type="button" class="stat-filter pass" :class="{ active: controlledStatusFilter === 'pass' }" title="筛选：通过（再点取消）" @click="toggleControlledStatusFilter('pass')">通过 <strong>{{ controlledVerify.passed }}</strong></button>
+          <button type="button" class="stat-filter fail" :class="{ active: controlledStatusFilter === 'fail' }" title="筛选：失败（再点取消）" @click="toggleControlledStatusFilter('fail')">失败 <strong>{{ controlledVerify.failed }}</strong></button>
+          <button type="button" class="stat-filter miss" :class="{ active: controlledStatusFilter === 'missing' }" title="筛选：缺失（再点取消）" @click="toggleControlledStatusFilter('missing')">缺失 <strong>{{ controlledVerify.missing }}</strong></button>
+          <button type="button" class="stat-filter err" :class="{ active: controlledStatusFilter === 'error' }" title="筛选：错误（再点取消）" @click="toggleControlledStatusFilter('error')">错误 <strong>{{ controlledVerify.errors }}</strong></button>
+        </p>
         <ul class="result-list">
-          <li v-for="(it, i) in controlledVerify.items" :key="'c-'+i" :class="{ ok: it.status === 'pass', bad: it.status !== 'pass' }">
+          <li v-for="(it, i) in filteredControlledItems" :key="'c-'+i" :class="{ ok: it.status === 'pass', bad: it.status !== 'pass' }">
             <div class="rel">{{ it.rel_path }}</div>
             <div class="msg">{{ it.status }} — {{ it.message }}</div>
             <div v-if="it.expected" class="hash">期望 {{ it.expected }}</div>
@@ -627,11 +658,12 @@ onUnmounted(() => { for (const u of unlisteners) u(); unlisteners = []; });
         </ul>
       </div>
       <div v-if="verifyReport" class="verify-summary">
-        <p>批次 {{ verifyReport.batch_id }} · {{ verifyReport.mode === "full" ? "完整" : "快速" }}：通过
-          <strong class="pass">{{ verifyReport.passed }}</strong> / 失败
-          <strong class="fail">{{ verifyReport.failed }}</strong></p>
+        <p>批次 {{ verifyReport.batch_id }} · {{ verifyReport.mode === "full" ? "完整" : "快速" }}：
+          <button type="button" class="stat-filter pass" :class="{ active: batchStatusFilter === 'pass' }" title="筛选：通过（再点取消）" @click="toggleBatchStatusFilter('pass')">通过 <strong>{{ verifyReport.passed }}</strong></button>
+          <button type="button" class="stat-filter fail" :class="{ active: batchStatusFilter === 'fail' }" title="筛选：失败（再点取消）" @click="toggleBatchStatusFilter('fail')">失败 <strong>{{ verifyReport.failed }}</strong></button>
+        </p>
         <ul class="result-list">
-          <li v-for="(it, i) in verifyReport.items" :key="'b-'+i" :class="{ ok: it.ok, bad: !it.ok }">
+          <li v-for="(it, i) in filteredBatchItems" :key="'b-'+i" :class="{ ok: it.ok, bad: !it.ok }">
             <div class="rel">{{ it.rel_path }}</div>
             <div class="msg">{{ it.message }}</div>
             <div v-if="it.src_hash" class="hash">源 {{ it.src_hash }}</div>
@@ -661,8 +693,8 @@ h1 { margin:0; font-size:1.35rem; font-weight:700; }
 .progress-track { height:8px; background:#0f1419; border-radius:999px; overflow:hidden; }
 .progress-fill { height:100%; background:linear-gradient(90deg,#2f5bff,#6d9bff); }
 .progress-file { margin-top:6px; font-size:0.78rem; color:#9aa7b8; word-break:break-all; }
-.layout { display:grid; grid-template-columns:1fr 340px; gap:12px; min-height:0; flex:1 1 auto; align-items:stretch; }
-.side { display:flex; flex-direction:column; gap:8px; min-height:100%; height:auto; align-self:stretch; overflow:visible; }
+.layout { display:grid; grid-template-columns:1fr 340px; gap:12px; min-height:0; flex:0 0 auto; align-items:stretch; }
+.side { display:flex; flex-direction:column; gap:8px; min-height:0; height:auto; align-self:start; overflow:visible; }
 .panel { background:#171d25; border:1px solid #2a3442; border-radius:12px; padding:12px; }
 .side > .panel { flex:0 0 auto; min-height:auto; overflow:visible; padding:8px 10px; }
 .panel-head { display:flex; align-items:center; justify-content:space-between; gap:8px; margin:0 0 4px; }
@@ -672,8 +704,8 @@ h1 { margin:0; font-size:1.35rem; font-weight:700; }
 .side .muted.small { margin:0 0 4px; line-height:1.3; display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; overflow:hidden; }
 .side .field { margin-bottom:6px; }
 .side .row { gap:6px; }
-/* Left browser stretches to match right column (校验+备份+索引) total height; list scrolls inside. */
-.explorer { display:flex; flex-direction:column; min-height:0; height:100%; max-height:none; overflow:hidden; }
+/* Left browser height follows right column (校验+备份+索引); list scrolls inside. height:0 + min-height:100% => row sized by .side. */
+.explorer { display:flex; flex-direction:column; height:0; min-height:100%; max-height:none; overflow:hidden; }
 .explorer .table-wrap { flex:1; min-height:0; overflow:auto; }
 .pathbar { display:flex; align-items:center; gap:10px; margin-bottom:8px; width:100%; }
 .pathbar .label { color:#9aa7b8; font-size:0.8rem; white-space:nowrap; }
@@ -715,7 +747,7 @@ input[type="text"], select { background:#0f1419; border:1px solid #2a3442; color
 .src-list { list-style:none; padding:0; margin:0 0 4px; max-height:52px; overflow:auto; font-size:0.78rem; scrollbar-width:none; }
 .src-list::-webkit-scrollbar { width:0; height:0; display:none; }
 .src-list li { display:flex; justify-content:space-between; gap:6px; padding:4px 0; border-bottom:1px solid #243041; word-break:break-all; }
-.results-panel { flex:0 0 auto; max-height:min(220px, 24vh); overflow:hidden; border-color:#3a4a63; padding:8px 12px; display:flex; flex-direction:column; min-height:0; }
+.results-panel { flex:0 0 auto; max-height:min(480px, 48vh); min-height:200px; overflow:hidden; border-color:#3a4a63; padding:8px 12px; display:flex; flex-direction:column; }
 .results-panel h2 { color:#9db4ff; flex:0 0 auto; }
 .results-panel > .muted.small { flex:0 0 auto; }
 .empty-results { padding:6px 8px; margin:0; flex:0 0 auto; }
@@ -730,7 +762,18 @@ input[type="text"], select { background:#0f1419; border:1px solid #2a3442; color
 .result-list li.ok { border-color:#2d6a45; background:#122018; }
 .result-list li.bad { border-color:#7a2e2e; background:#201212; }
 .rel { font-weight:600; } .hash { font-family:ui-monospace,Consolas,monospace; color:#9aa7b8; word-break:break-all; }
-@media (max-width:1000px) { .layout { grid-template-columns:1fr; } .explorer { height:auto; max-height:50vh; } .side { height:auto; overflow:visible; } }
+.stat-filter {
+  appearance:none; background:transparent; border:1px solid transparent; color:inherit;
+  font:inherit; padding:1px 6px; margin:0 2px; border-radius:6px; cursor:pointer; line-height:1.4;
+}
+.stat-filter strong { font-weight:700; }
+.stat-filter.pass, .stat-filter.pass strong { color:#3ecf8e; }
+.stat-filter.fail, .stat-filter.fail strong { color:#ff6b6b; }
+.stat-filter.miss, .stat-filter.miss strong { color:#e6c07b; }
+.stat-filter.err, .stat-filter.err strong { color:#ff9f43; }
+.stat-filter:hover { border-color:#3a4a63; background:#0f1419; }
+.stat-filter.active { border-color:#6d9bff; background:#1a2433; box-shadow:inset 0 0 0 1px #2f5bff55; }
+@media (max-width:1000px) { .layout { grid-template-columns:1fr; } .explorer { height:auto; min-height:0; max-height:50vh; } .side { height:auto; align-self:stretch; overflow:visible; } }
 .progress-row { display:flex; align-items:center; gap:12px; }
 .progress-main { flex:1; min-width:0; }
 </style>

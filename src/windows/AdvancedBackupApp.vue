@@ -43,7 +43,8 @@ function normDrive(p: string): string {
 function isDriveRoot(p: string): boolean {
   return /^[A-Za-z]:[\\/]?$/.test((p || "").trim());
 }
-function formatSize(n: number): string {
+function formatSize(n: number | null | undefined): string {
+  if (n == null || typeof n !== "number" || !Number.isFinite(n) || n < 0) return "-";
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
   if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
@@ -248,8 +249,8 @@ onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } })
                 <td class="name" @click="(e.is_dir || e.is_backup_disk || isDriveRoot(e.path)) ? openSrc(e) : toggleSrc(e.path)">
                   <span class="icon" aria-hidden="true">{{ (e.is_dir || e.is_backup_disk || isDriveRoot(e.path)) ? "📁" : "📄" }}</span>{{ e.name || e.path }}
                 </td>
-                <td>{{ e.is_dir || e.is_backup_disk ? "文件夹" : "文件" }}</td>
-                <td>{{ e.is_dir || e.is_backup_disk ? "—" : formatSize(e.size) }}</td>
+                <td>{{ e.is_dir || e.is_backup_disk || isDriveRoot(e.path) ? "文件夹" : "文件" }}</td>
+                <td>{{ e.is_dir || e.is_backup_disk || isDriveRoot(e.path) ? "—" : formatSize(e.size) }}</td>
                 <td><span v-if="e.is_backup_disk" class="badge backup">备份盘</span></td>
                 <td><span v-if="e.is_controlled" class="badge controlled" title="已在 vault.db 登记">受控</span></td>
               </tr>
@@ -288,8 +289,14 @@ onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } })
                 <td>文件夹</td>
                 <td><span v-if="e.is_backup_disk" class="badge backup">备份盘</span></td>
               </tr>
-              <tr v-if="!dstEntries.length">
+              <tr v-if="!dstEntries.length && !dstPath">
                 <td colspan="4" class="muted center">无可用备份盘。请先在主窗口「标记为备份盘」。</td>
+              </tr>
+              <tr v-if="!dstEntries.length && dstPath" class="selected dest-here-row">
+                <td colspan="4" class="muted center dest-here">
+                  <div>备份到此目录（当前为空）</div>
+                  <strong class="dest-path">{{ dstSelected || dstPath }}</strong>
+                </td>
               </tr>
             </tbody>
           </table>
@@ -338,5 +345,8 @@ tr.selected { background:#1e2a40; } tr:hover { background:#1a222e; }
 .badge { font-size:0.72rem; background:#2f5bff; padding:2px 8px; border-radius:999px; margin-left:6px; }
 .badge.backup { background:#1f6b45; margin-left:0; }
 .badge.controlled { background:#5b3db8; margin-left:0; }
+.dest-here { padding:14px 10px; line-height:1.5; }
+.dest-here .dest-path { display:block; margin-top:6px; color:#9db4ff; word-break:break-all; font-size:0.85rem; }
+.dest-here-row { background:#1e2a40; }
 @media (max-width:900px) { .panes { grid-template-columns:1fr; } }
 </style>

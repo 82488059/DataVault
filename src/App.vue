@@ -135,7 +135,8 @@ const currentDrive = computed(() => {
 const backupDriveSet = ref<Set<string>>(new Set());
 const currentIsBackup = ref(false);
 
-function formatSize(n: number): string {
+function formatSize(n: number | null | undefined): string {
+  if (n == null || typeof n !== "number" || !Number.isFinite(n) || n < 0) return "-";
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
   if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
@@ -570,11 +571,11 @@ onUnmounted(() => {
                   />
                 </td>
                 <td class="name" @click="e.is_dir ? openEntry(e) : toggleSelect(e.path)">
-                  <span class="icon">{{ e.is_dir ? "📁" : "📄" }}</span>
+                  <span class="icon">{{ e.is_dir || isDriveRoot(e.path) ? "📁" : "📄" }}</span>
                   {{ e.name }}
                 </td>
-                <td>{{ e.is_dir ? "文件夹" : "文件" }}</td>
-                <td>{{ e.is_dir ? "—" : formatSize(e.size) }}</td>
+                <td>{{ e.is_dir || isDriveRootPath(e.path) ? "文件夹" : "文件" }}</td>
+                <td>{{ e.is_dir || isDriveRoot(e.path) ? "—" : formatSize(e.size) }}</td>
                 <td>
                   <span v-if="e.is_backup_disk" class="badge backup">备份盘</span>
                 </td>
