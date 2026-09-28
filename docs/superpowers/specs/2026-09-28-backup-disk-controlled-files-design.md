@@ -219,7 +219,7 @@ return hex(ctx.digest())
 
 在已批准设计之上补充（与多窗口 UI 一并落地）：
 
-1. **校验范围**：除「全部受控」外，支持按用户勾选的目录和/或文件缩小范围。实现上调用 `resolve_controlled_selection`：将绝对路径展开并与 `controlled_files` 求交；**未受控路径静默忽略**，不进入 UI 列表与校验结果。
+1. **校验范围**：除「全部受控」外，支持按用户勾选的目录和/或文件缩小范围。实现上调用 `resolve_controlled_selection`：将绝对路径展开并与 `controlled_files` 求交；**未受控路径静默忽略**，不进入 UI 列表与校验结果。勾选**备份盘符根**时视为全盘受控（`resolve_controlled_selection` 对盘根路径返回全部）；UI 在盘符列表勾选备份盘时启用快速/完整校验，非备份盘符不启用。
 2. **UI 受控标记**：`list_dir` 增加 `is_controlled`。文件：`rel_path` 在库中；目录：其下至少有一条受控 `rel_path` 前缀匹配。主窗口与备份窗口展示「受控」徽章。
 3. **跳过重哈希**：`start_add_controlled_files` / `start_index_backup_disk`（及同步 `add_controlled_files`）在计算 MD5/FastMD5 前跳过库中已有 `rel_path`，完成消息报告 `skipped`。
 4. **设为目标目录**：备份窗口允许勾选**一个**目录作为备份目标；未勾选时回退为当前浏览目录。

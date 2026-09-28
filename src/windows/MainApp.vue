@@ -130,8 +130,8 @@ function progressPct(j: ActiveJob): string {
   return Math.min(100, (100 * j.current) / j.total) + "%";
 }
 
-/** Drive for indexing: current backup path, or one selected backup drive root at 盘符 list. */
-function resolveIndexDrive(): string {
+/** Drive for index/verify: current backup path, or one selected backup drive root at 盘符 list. */
+function resolveBackupDrive(): string {
   if (currentIsBackup.value && currentDrive.value) return currentDrive.value;
   if (!currentPath.value && selected.value.size > 0) {
     for (const p of selected.value) {
@@ -143,7 +143,9 @@ function resolveIndexDrive(): string {
   }
   return "";
 }
-const canIndex = computed(() => !!resolveIndexDrive());
+const canIndex = computed(() => !!resolveBackupDrive());
+/** Enable quick/full verify when browsing a backup disk or when a backup drive letter is checked. */
+const canVerifyControlled = computed(() => !!resolveBackupDrive());
 
 function formatSize(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -293,7 +295,7 @@ async function doAddControlled() {
 
 async function doIndex() {
   errorMsg.value = ""; statusMsg.value = "";
-  const drive = resolveIndexDrive();
+  const drive = resolveBackupDrive();
   if (!drive) {
     errorMsg.value = "请先进入已标记的备份盘，或在盘符列表勾选一个备份盘"; return;
   }
@@ -305,21 +307,25 @@ async function doIndex() {
   } catch (e) { errorMsg.value = String(e); statusMsg.value = ""; }
 }
 
-/** Verify controlled files: use current browse selection as paths filter; none → all. */
+/** Verify controlled files: selection filters scope; backup drive-letter check = all controlled on that disk. */
 async function doVerifyControlled(mode: "full" | "quick") {
   errorMsg.value = ""; statusMsg.value = "";
-  if (!currentIsBackup.value || !currentDrive.value) { errorMsg.value = "当前没有备份盘上下文"; return; }
+  const drive = resolveBackupDrive();
+  if (!drive) { errorMsg.value = "请先进入已标记的备份盘，或在盘符列表勾选一个备份盘"; return; }
   try {
     controlledVerify.value = null; verifyReport.value = null;
     const sel = Array.from(selected.value);
+    // At 盘符 list with backup root checked: paths include drive root → backend expands to all controlled.
+    const onlyBackupRoot = !currentPath.value && sel.length > 0 && sel.every((p) => isDriveRootPath(p));
+    const pathsArg = onlyBackupRoot ? sel : (sel.length ? sel : null);
     statusMsg.value = mode === "full"
-      ? (sel.length ? "按勾选完整校验进行中…" : "全部受控完整校验进行中…")
-      : (sel.length ? "按勾选快速校验进行中…" : "全部受控快速校验进行中…");
+      ? (pathsArg && !onlyBackupRoot ? "按勾选完整校验进行中…" : "全部受控完整校验进行中…")
+      : (pathsArg && !onlyBackupRoot ? "按勾选快速校验进行中…" : "全部受控快速校验进行中…");
     const start = await invoke<JobStart>("start_verify_controlled", {
-      drive: currentDrive.value,
+      drive,
       mode,
       relPaths: null,
-      paths: sel.length ? sel : null,
+      paths: pathsArg,
     });
     upsertJob({ job_id: start.job_id, kind: start.kind, phase: "verifying", message: "正在校验…" });
     statusMsg.value = `校验任务 ${start.job_id} 已开始（可与其它任务并行）`;
@@ -486,10 +492,10 @@ onUnmounted(() => { for (const u of unlisteners) u(); unlisteners = []; });
       <aside class="side">
         <section class="panel">
           <h2>校验</h2>
-          <p class="muted small">直接使用当前勾选的目录/文件（仅其中已受控项）；未勾选则校验全部受控。可与备份/索引并行。</p>
+          <p class="muted small">直接使用当前勾选的目录/文件（仅其中已受控项）；未勾选则校验全部受控。在盘符列表勾选备份盘符亦可（等同该盘全部受控）。非备份盘符不启用。可与备份/索引并行。</p>
           <div class="row">
-            <button class="btn primary" title="按当前勾选（或全部）快速校验" :disabled="!currentIsBackup" @click="doVerifyControlled('quick')">快速校验</button>
-            <button class="btn" title="按当前勾选（或全部）完整校验" :disabled="!currentIsBackup" @click="doVerifyControlled('full')">完整校验</button>
+            <button class="btn primary" title="按当前勾选（或全部）快速校验；盘符列表勾选备份盘=该盘全部受控" :disabled="!canVerifyControlled" @click="doVerifyControlled('quick')">快速校验</button>
+            <button class="btn" title="按当前勾选（或全部）完整校验；盘符列表勾选备份盘=该盘全部受控" :disabled="!canVerifyControlled" @click="doVerifyControlled('full')">完整校验</button>
           </div>
           <label class="field" style="margin-top:10px"><span>备份批次</span>
             <select v-model="verifyBatchId">
