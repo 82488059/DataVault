@@ -63,7 +63,8 @@ async function loadSrc(path: string) {
   try {
     if (!path) {
       const drives = await invoke<DirEntry[]>("list_drives");
-      srcEntries.value = drives;
+      // Source pane: exclude already-marked backup disks (dest side only).
+      srcEntries.value = drives.filter((d) => !d.is_backup_disk);
     } else {
       const raw = await invoke<DirEntry[]>("list_dir", { path });
       srcEntries.value = raw.filter((e) => e.name.toLowerCase() !== ".datavault");
@@ -200,7 +201,7 @@ onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } })
     <header class="header">
       <div>
         <h1>高级备份 <span class="sub">DataVault</span></h1>
-        <p class="hint">左侧多选源文件/目录；右侧仅可单选备份盘或其子目录作为目标。</p>
+        <p class="hint">左侧多选源（不含已标记备份盘）；右侧仅可单选备份盘或其子目录作为目标。</p>
       </div>
       <button class="btn primary" title="将左侧勾选复制到右侧所选目标" :disabled="!canBackup" @click="doBackup">开始备份</button>
     </header>
