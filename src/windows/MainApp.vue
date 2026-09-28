@@ -75,6 +75,25 @@ const sources = ref<string[]>([]);
 const lastBatch = ref<BackupBatch | null>(null);
 const batchIds = ref<string[]>([]);
 const verifyBatchId = ref("");
+const batchFilter = ref("");
+const batchComboOpen = ref(false);
+const filteredBatchIds = computed(() => {
+  const q = batchFilter.value.trim().toLowerCase();
+  if (!q) return batchIds.value;
+  return batchIds.value.filter((id) => id.toLowerCase().includes(q));
+});
+function pickBatch(id: string) {
+  verifyBatchId.value = id;
+  batchFilter.value = id;
+  batchComboOpen.value = false;
+}
+function onBatchComboBlur(ev: FocusEvent) {
+  const box = ev.currentTarget as HTMLElement | null;
+  const next = ev.relatedTarget as Node | null;
+  if (box && next && box.contains(next)) return;
+  batchComboOpen.value = false;
+  if (verifyBatchId.value) batchFilter.value = verifyBatchId.value;
+}
 const verifyReport = ref<VerifyReport | null>(null);
 const controlledVerify = ref<ControlledVerifyReport | null>(null);
 
@@ -191,6 +210,7 @@ async function refreshBatches() {
   try {
     batchIds.value = await invoke<string[]>("list_batches");
     if (!verifyBatchId.value && batchIds.value.length) verifyBatchId.value = batchIds.value[0];
+    if (verifyBatchId.value) batchFilter.value = verifyBatchId.value;
   } catch { batchIds.value = []; }
 }
 
@@ -433,7 +453,7 @@ onMounted(async () => {
   const u4 = await bind("backup-job-finished", (p: BackupJobFinished) => {
     removeJob(p.job_id);
     statusMsg.value = p.message;
-    if (p.batch) { lastBatch.value = p.batch; verifyBatchId.value = p.batch.id; }
+    if (p.batch) { lastBatch.value = p.batch; verifyBatchId.value = p.batch.id; batchFilter.value = p.batch.id; }
     if (!p.ok && !p.cancelled) errorMsg.value = p.message;
     void refreshBatches();
   });
@@ -536,27 +556,35 @@ onUnmounted(() => { for (const u of unlisteners) u(); unlisteners = []; });
 
       <aside class="side">
         <section class="panel">
-          <h2>校验</h2>
+          <div class="panel-head">
+            <h2>校验</h2>
+            <button type="button" class="btn small primary-outline panel-head-action" title="打开高级校验窗口：批次号/时间/文件数/盘符，可多选校验" @click="openAdvancedVerify">高级校验</button>
+          </div>
           <p class="muted small">直接使用当前勾选的目录/文件（仅其中已受控项）；未勾选则校验全部受控。在盘符列表勾选备份盘符亦可（等同该盘全部受控）。非备份盘符不启用。可与备份/索引并行。</p>
           <div class="row">
             <button class="btn primary" title="按当前勾选（或全部）快速校验；盘符列表勾选备份盘=该盘全部受控" :disabled="!canVerifyControlled" @click="doVerifyControlled('quick')">快速校验</button>
             <button class="btn" title="按当前勾选（或全部）完整校验；盘符列表勾选备份盘=该盘全部受控" :disabled="!canVerifyControlled" @click="doVerifyControlled('full')">完整校验</button>
           </div>
           <label class="field" style="margin-top:10px"><span>备份批次</span>
-            <select v-model="verifyBatchId">
-              <option disabled value="">请选择批次</option>
-              <option v-for="id in batchIds" :key="id" :value="id">{{ id }}</option>
-            </select>
+            <div class="batch-combo" @focusout="onBatchComboBlur">
+              <input type="text" class="batch-combo-input" v-model="batchFilter" :placeholder="verifyBatchId || '请选择或输入过滤'" title="输入关键词过滤批次列表，点选一项" autocomplete="off" @focus="batchComboOpen = true" @input="batchComboOpen = true" @keydown.down.prevent="batchComboOpen = true" />
+              <ul v-if="batchComboOpen" class="batch-combo-list">
+                <li v-if="!filteredBatchIds.length" class="muted">无匹配批次</li>
+                <li v-for="id in filteredBatchIds" :key="id" :class="{ active: id === verifyBatchId }" @mousedown.prevent="pickBatch(id)">{{ id }}</li>
+              </ul>
+            </div>
           </label>
           <div class="row">
             <button class="btn primary" title="对所选批次做快速校验" @click="doVerifyBatch('quick')">批次快速校验</button>
             <button class="btn" title="对所选批次做完整校验" @click="doVerifyBatch('full')">批次完整校验</button>
           </div>
-          <button class="btn primary-outline" style="margin-top:8px" title="打开高级校验窗口：批次号/时间/文件数/盘符，可多选校验" @click="openAdvancedVerify">高级校验…</button>
         </section>
 
         <section class="panel">
-          <h2>备份批次</h2>
+          <div class="panel-head">
+            <h2>备份批次</h2>
+            <button type="button" class="btn small primary-outline panel-head-action" title="打开双栏高级备份：左多选源，右单选备份盘/子目录" @click="openAdvancedBackup">高级备份</button>
+          </div>
           <p class="muted small">源（{{ sources.length }}）</p>
           <ul class="src-list">
             <li v-for="s in sources" :key="s"><span>{{ s }}</span>
@@ -570,14 +598,15 @@ onUnmounted(() => { for (const u of unlisteners) u(); unlisteners = []; });
             <input v-model="destPath" type="text" placeholder="例如 E:\Backup\DataVault" title="备份复制到此目录" />
           </label>
           <button class="btn primary" title="开始将源复制到目标并写批次（可与其它任务并行）" @click="doBackup">开始备份</button>
-          <button class="btn primary-outline" style="margin-top:8px" title="打开双栏高级备份：左多选源，右单选备份盘/子目录" @click="openAdvancedBackup">高级备份…</button>
           <p v-if="lastBatch" class="muted small">最近批次：<strong>{{ lastBatch.id }}</strong>（{{ lastBatch.files.length }} 个文件）</p>
         </section>
 
         <section class="panel">
-          <h2>备份索引</h2>
-          <p class="muted small">勾选文件/目录则仅索引所选；勾选备份盘符或进入备份盘未再勾选则索引全盘；勾选未标记盘符时确认后先标记再索引。已在 vault.db 中的跳过，不重算哈希。</p>
-          <button class="btn primary-outline" title="勾选文件/目录→索引所选；勾选备份盘符→全盘索引；勾选未标记盘符→确认后标记并索引"
+          <div class="panel-head">
+            <h2>备份索引</h2>
+          </div>
+          <p class="muted small" title="勾选文件或目录后，索引所选项，并将所选盘标记为备份盘；已在 vault.db 中的跳过，不重算哈希。">勾选文件/目录后索引所选项，并将所选盘标记为备份盘；已在 vault.db 中的跳过，不重算哈希。</p>
+          <button class="btn primary-outline" title="勾选文件/目录→索引所选并标记该盘为备份盘；已在 vault.db 中的跳过，不重算哈希"
             :disabled="!canIndex" @click="doIndex">建立备份索引</button>
         </section>
       </aside>
@@ -619,7 +648,7 @@ onUnmounted(() => { for (const u of unlisteners) u(); unlisteners = []; });
 </template>
 
 <style scoped>
-.app { min-height:100vh; height:100vh; overflow:hidden; background:#0f1419; color:#e7ecf3; font-family:"Segoe UI","Microsoft YaHei",system-ui,sans-serif; padding:14px 16px 18px; box-sizing:border-box; display:flex; flex-direction:column; gap:10px; }
+.app { min-height:100vh; height:100vh; overflow-x:hidden; overflow-y:auto; background:#0f1419; color:#e7ecf3; font-family:"Segoe UI","Microsoft YaHei",system-ui,sans-serif; padding:12px 16px 12px; box-sizing:border-box; display:flex; flex-direction:column; gap:8px; }
 .header { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; }
 h1 { margin:0; font-size:1.35rem; font-weight:700; }
 .sub { color:#7aa2ff; font-weight:500; font-size:0.95rem; }
@@ -635,13 +664,16 @@ h1 { margin:0; font-size:1.35rem; font-weight:700; }
 .progress-track { height:8px; background:#0f1419; border-radius:999px; overflow:hidden; }
 .progress-fill { height:100%; background:linear-gradient(90deg,#2f5bff,#6d9bff); }
 .progress-file { margin-top:6px; font-size:0.78rem; color:#9aa7b8; word-break:break-all; }
-.layout { display:grid; grid-template-columns:1fr 320px; gap:12px; min-height:0; flex:1; align-items:stretch; }
-.side { display:flex; flex-direction:column; gap:8px; min-height:0; height:100%; overflow:hidden; }
+.layout { display:grid; grid-template-columns:1fr 340px; gap:12px; min-height:0; flex:1 1 auto; align-items:stretch; }
+.side { display:flex; flex-direction:column; gap:8px; min-height:100%; height:auto; align-self:stretch; overflow:visible; }
 .panel { background:#171d25; border:1px solid #2a3442; border-radius:12px; padding:12px; }
-.side > .panel { flex:0 1 auto; min-height:0; overflow:hidden; padding:10px; }
-.side h2 { margin:0 0 6px; font-size:0.9rem; }
-.side .muted.small { margin:0 0 6px; line-height:1.35; }
-.side .field { margin-bottom:8px; }
+.side > .panel { flex:0 0 auto; min-height:auto; overflow:visible; padding:8px 10px; }
+.panel-head { display:flex; align-items:center; justify-content:space-between; gap:8px; margin:0 0 4px; }
+.panel-head h2 { margin:0; font-size:0.88rem; flex:1; min-width:0; }
+.panel-head-action { flex:0 0 auto; width:auto; margin:0; padding:4px 8px; white-space:nowrap; }
+.side h2 { margin:0 0 4px; font-size:0.88rem; }
+.side .muted.small { margin:0 0 4px; line-height:1.3; display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; overflow:hidden; }
+.side .field { margin-bottom:6px; }
 .side .row { gap:6px; }
 /* Left browser stretches to match right column (校验+备份+索引) total height; list scrolls inside. */
 .explorer { display:flex; flex-direction:column; min-height:0; height:100%; max-height:none; overflow:hidden; }
@@ -670,25 +702,32 @@ input[type="text"], select { background:#0f1419; border:1px solid #2a3442; color
 .btn.primary-outline { border-color:#2f5bff; color:#9db4ff; background:transparent; width:100%; margin-top:6px; }
 .btn.small { padding:4px 8px; font-size:0.78rem; width:auto; margin:0; }
 .btn.tiny { padding:0 6px; font-size:0.75rem; }
-.side .row .btn { width:auto; flex:1; margin:0; }
+.side .row .btn { width:auto; flex:1 1 calc(50% - 4px); min-width:0; margin:0; padding:6px 8px; }
+.side > .panel > .btn { padding:6px 10px; }
+.batch-combo { position:relative; }
+.batch-combo-input { width:100%; }
+.batch-combo-list { position:absolute; z-index:20; left:0; right:0; top:calc(100% + 2px); max-height:160px; overflow:auto; margin:0; padding:4px 0; list-style:none; background:#0f1419; border:1px solid #2a3442; border-radius:8px; box-shadow:0 8px 24px rgba(0,0,0,.35); }
+.batch-combo-list li { padding:6px 10px; cursor:pointer; font-size:0.82rem; word-break:break-all; }
+.batch-combo-list li:hover, .batch-combo-list li.active { background:#1e2a40; }
+.batch-combo-list li.muted { cursor:default; color:#9aa7b8; }
 .muted { color:#9aa7b8; } .small { font-size:0.78rem; } .center { text-align:center; }
 .pass { color:#6dffa0; } .fail { color:#ff8f8f; }
 .badge { font-size:0.72rem; background:#2f5bff; padding:2px 8px; border-radius:999px; margin-left:6px; }
 .badge.backup { background:#1f6b45; }
 .badge.controlled { background:#5b3db8; margin-left:0; }
-.src-list { list-style:none; padding:0; margin:0 0 6px; max-height:64px; overflow:auto; font-size:0.78rem; scrollbar-width:none; }
+.src-list { list-style:none; padding:0; margin:0 0 4px; max-height:52px; overflow:auto; font-size:0.78rem; scrollbar-width:none; }
 .src-list::-webkit-scrollbar { width:0; height:0; display:none; }
 .src-list li { display:flex; justify-content:space-between; gap:6px; padding:4px 0; border-bottom:1px solid #243041; word-break:break-all; }
-.results-panel { flex-shrink:0; max-height:min(240px, 28vh); overflow:auto; border-color:#3a4a63; }
+.results-panel { flex:0 0 auto; max-height:min(180px, 20vh); overflow:auto; border-color:#3a4a63; padding:8px 12px; }
 .results-panel h2 { color:#9db4ff; }
-.empty-results { padding:16px 8px; }
-.result-list { list-style:none; padding:0; margin:8px 0 0; max-height:220px; overflow:auto; }
+.empty-results { padding:6px 8px; margin:0; }
+.result-list { list-style:none; padding:0; margin:6px 0 0; max-height:120px; overflow:auto; }
 .result-list li { padding:8px; border-radius:8px; margin-bottom:6px; border:1px solid #2a3442; font-size:0.78rem; }
 .result-list li.ok { border-color:#2d6a45; background:#122018; }
 .result-list li.bad { border-color:#7a2e2e; background:#201212; }
 .rel { font-weight:600; } .hash { font-family:ui-monospace,Consolas,monospace; color:#9aa7b8; word-break:break-all; }
 .verify-summary { margin-top:8px; }
-@media (max-width:1000px) { .layout { grid-template-columns:1fr; } .explorer { height:auto; max-height:50vh; } .side { height:auto; overflow:hidden; } }
+@media (max-width:1000px) { .layout { grid-template-columns:1fr; } .explorer { height:auto; max-height:50vh; } .side { height:auto; overflow:visible; } }
 .progress-row { display:flex; align-items:center; gap:12px; }
 .progress-main { flex:1; min-width:0; }
 </style>

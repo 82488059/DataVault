@@ -303,7 +303,7 @@ onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } })
 
 <style scoped>
 .app { min-height:100vh; background:#0f1419; color:#e7ecf3; font-family:"Segoe UI","Microsoft YaHei",system-ui,sans-serif; padding:14px 16px 18px; box-sizing:border-box; display:flex; flex-direction:column; gap:10px; }
-.header { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; }
+.header { display:flex; justify-content:space-between; align-items:center; gap:12px; }
 h1 { margin:0; font-size:1.25rem; font-weight:700; }
 h2 { margin:0 0 8px; font-size:0.95rem; color:#9db4ff; }
 .sub { color:#7aa2ff; font-weight:500; font-size:0.95rem; }

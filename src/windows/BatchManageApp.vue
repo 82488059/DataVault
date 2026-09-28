@@ -45,6 +45,12 @@ interface VerifyJobFinished {
 }
 
 const rows = ref<BatchRow[]>([]);
+const batchFilter = ref("");
+const filteredRows = computed(() => {
+  const q = batchFilter.value.trim().toLowerCase();
+  if (!q) return rows.value;
+  return rows.value.filter((r) => String(r.id).toLowerCase().includes(q));
+});
 const selected = ref<Set<string>>(new Set());
 const busy = ref(false);
 const errorMsg = ref("");
@@ -301,11 +307,14 @@ onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } })
       <section class="panel pane">
         <h2>按批次校验</h2>
         <p class="muted small">勾选备份批次后执行快/完整校验。批次号为名称或本地年月日时分秒。</p>
+        <label class="field"><span>过滤批次</span>
+          <input type="text" v-model="batchFilter" placeholder="输入关键词过滤批次号" title="输入时过滤下方批次列表" />
+        </label>
         <div class="toolbar">
-          <button class="btn small" @click="toggleAll">{{ selected.size === rows.length && rows.length ? "清空选择" : "全选" }}</button>
+          <button class="btn small" @click="toggleAll">{{ selected.size === filteredRows.length && filteredRows.length ? "清空选择" : "全选" }}</button>
           <button class="btn small primary" title="对勾选批次做快速校验" :disabled="!hasSelection || busy" @click="doVerify('quick')">快速校验</button>
           <button class="btn small" title="对勾选批次做完整校验" :disabled="!hasSelection || busy" @click="doVerify('full')">完整校验</button>
-          <span class="muted">已选 {{ selected.size }} / {{ rows.length }}</span>
+          <span class="muted">已选 {{ selected.size }} / {{ filteredRows.length }}</span>
         </div>
         <div class="table-wrap">
           <table>
@@ -319,7 +328,7 @@ onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } })
               </tr>
             </thead>
             <tbody>
-              <tr v-for="r in rows" :key="r.id" :class="{ selected: selected.has(r.id) }">
+              <tr v-for="r in filteredRows" :key="r.id" :class="{ selected: selected.has(r.id) }">
                 <td @click.stop>
                   <input type="checkbox" :checked="selected.has(r.id)" @change="toggle(r.id)" />
                 </td>
