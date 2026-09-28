@@ -48,9 +48,13 @@ interface VerifyJobFinished {
 const rows = ref<BatchRow[]>([]);
 const batchFilter = ref("");
 const filteredRows = computed(() => {
-  const q = batchFilter.value.trim().toLowerCase();
-  if (!q) return rows.value;
-  return rows.value.filter((r) => String(r.id).toLowerCase().includes(q));
+  const raw = batchFilter.value.trim().toLowerCase();
+  if (!raw) return rows.value;
+  const keys = raw.split(/\s+/).filter(Boolean);
+  return rows.value.filter((r) => {
+    const id = String(r.id).toLowerCase();
+    return keys.every((k) => id.includes(k));
+  });
 });
 const selected = ref<Set<string>>(new Set());
 const busy = ref(false);
@@ -59,6 +63,27 @@ const statusMsg = ref("");
 const progress = ref<JobProgress | null>(null);
 const lastReport = ref<VerifyReport | null>(null);
 const controlledReport = ref<ControlledVerifyReport | null>(null);
+type ControlledStatusFilter = "pass" | "fail" | "missing" | "error";
+const controlledStatusFilter = ref<ControlledStatusFilter | null>(null);
+const batchStatusFilter = ref<"pass" | "fail" | null>(null);
+const filteredControlledItems = computed(() => {
+  const items = controlledReport.value?.items ?? [];
+  const f = controlledStatusFilter.value;
+  if (!f) return items;
+  return items.filter((it) => it.status === f);
+});
+const filteredBatchItems = computed(() => {
+  const items = lastReport.value?.items ?? [];
+  const f = batchStatusFilter.value;
+  if (!f) return items;
+  return items.filter((it) => (f === "pass" ? it.ok : !it.ok));
+});
+function toggleControlledStatusFilter(status: ControlledStatusFilter) {
+  controlledStatusFilter.value = controlledStatusFilter.value === status ? null : status;
+}
+function toggleBatchStatusFilter(status: "pass" | "fail") {
+  batchStatusFilter.value = batchStatusFilter.value === status ? null : status;
+}
 const unlisteners: UnlistenFn[] = [];
 
 const dirPath = ref("");
@@ -206,7 +231,7 @@ function resolveDirDrive(): string {
 }
 
 async function doVerifyDir(mode: "full" | "quick") {
-  errorMsg.value = ""; statusMsg.value = ""; controlledReport.value = null;
+  errorMsg.value = ""; statusMsg.value = ""; controlledReport.value = null; controlledStatusFilter.value = null;
   const sel = Array.from(dirSelected.value);
   if (!sel.length) { errorMsg.value = "请先在目录列表勾选要校验的目录或文件"; return; }
   const drive = resolveDirDrive();
@@ -252,8 +277,9 @@ onMounted(async () => {
   await bind("verify-job-finished", (p: VerifyJobFinished) => {
     progress.value = null;
     if (p.batch) lastReport.value = p.batch;
-    if (p.controlled) controlledReport.value = p.controlled;
-    statusMsg.value = p.message || (p.ok ? "校验完成" : "校验结束");
+    if (p.controlled) { controlledReport.value = p.controlled; controlledStatusFilter.value = null; }
+    if (p.batch) { lastReport.value = p.batch; batchStatusFilter.value = null; }
+    statusMsg.value = "";
     void refresh();
   });
   await bind("dir-counts-update", (p: DirCountUpdate) => {
@@ -278,7 +304,6 @@ onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } })
     </header>
 
     <p v-if="errorMsg" class="banner error">{{ errorMsg }}</p>
-    <p v-if="statusMsg" class="banner ok">{{ statusMsg }}</p>
     <div v-if="progress" class="banner progress">
       <div class="progress-meta">
         <span>{{ progress.phase }} · {{ progress.job_id }}</span>
@@ -339,9 +364,11 @@ onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } })
       <section class="panel pane">
         <h2>按批次校验</h2>
         <p class="muted small">勾选备份批次后执行快/完整校验。批次号为名称或本地年月日时分秒。</p>
-        <label class="field"><span>过滤批次</span>
-          <input type="text" v-model="batchFilter" placeholder="输入关键词过滤批次号" title="输入时过滤下方批次列表" />
-        </label>
+        <div class="batch-search" title="空格分隔多个关键词，匹配批次号">
+          <span class="batch-search-icon" aria-hidden="true">⌕</span>
+          <input type="search" class="batch-search-input" v-model="batchFilter" placeholder="过滤批次号（关键词，空格分隔）" autocomplete="off" />
+          <button v-if="batchFilter" type="button" class="batch-search-clear" title="清除过滤" @click="batchFilter = ''">×</button>
+        </div>
         <div class="toolbar">
           <button class="btn small" @click="toggleAll">{{ selected.size === filteredRows.length && filteredRows.length ? "清空选择" : "全选" }}</button>
           <button class="btn small primary" title="对勾选批次做快速校验" :disabled="!hasSelection || busy" @click="doVerify('quick')">快速校验</button>
@@ -379,13 +406,15 @@ onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } })
     </div>
 
     <section v-if="controlledReport" class="panel results">
-      <h2>目录校验结果</h2>
-      <p>受控 · {{ controlledReport.drive_root }} · {{ controlledReport.mode === "full" ? "完整" : "快速" }}：通过
-        <strong class="pass">{{ controlledReport.passed }}</strong> / 失败
-        <strong class="fail">{{ controlledReport.failed }}</strong> / 缺失
-        {{ controlledReport.missing }} / 错误 {{ controlledReport.errors }}</p>
+      <h2>校验结果</h2>
+      <p>受控 · {{ controlledReport.drive_root }} · {{ controlledReport.mode === "full" ? "完整" : "快速" }}：
+        <button type="button" class="stat-filter pass" :class="{ active: controlledStatusFilter === 'pass' }" title="筛选：通过（再点取消）" @click="toggleControlledStatusFilter('pass')">通过 <strong>{{ controlledReport.passed }}</strong></button>
+        <button type="button" class="stat-filter fail" :class="{ active: controlledStatusFilter === 'fail' }" title="筛选：失败（再点取消）" @click="toggleControlledStatusFilter('fail')">失败 <strong>{{ controlledReport.failed }}</strong></button>
+        <button type="button" class="stat-filter miss" :class="{ active: controlledStatusFilter === 'missing' }" title="筛选：缺失（再点取消）" @click="toggleControlledStatusFilter('missing')">缺失 <strong>{{ controlledReport.missing }}</strong></button>
+        <button type="button" class="stat-filter err" :class="{ active: controlledStatusFilter === 'error' }" title="筛选：错误（再点取消）" @click="toggleControlledStatusFilter('error')">错误 <strong>{{ controlledReport.errors }}</strong></button>
+      </p>
       <ul class="result-list">
-        <li v-for="(it, i) in controlledReport.items" :key="'c-'+i" :class="{ ok: it.status === 'pass', bad: it.status !== 'pass' }">
+        <li v-for="(it, i) in filteredControlledItems" :key="'c-'+i" :class="{ ok: it.status === 'pass', bad: it.status !== 'pass' }">
           <div class="rel">{{ it.rel_path }}</div>
           <div class="msg">{{ it.status }} · {{ it.message }}</div>
         </li>
@@ -394,11 +423,12 @@ onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } })
 
     <section v-if="lastReport" class="panel results">
       <h2>批次校验结果</h2>
-      <p>批次 {{ lastReport.batch_id }} · {{ lastReport.mode === "full" ? "完整" : "快速" }}：通过
-        <strong class="pass">{{ lastReport.passed }}</strong> / 失败
-        <strong class="fail">{{ lastReport.failed }}</strong></p>
+      <p>批次 {{ lastReport.batch_id }} · {{ lastReport.mode === "full" ? "完整" : "快速" }}：
+        <button type="button" class="stat-filter pass" :class="{ active: batchStatusFilter === 'pass' }" title="筛选：通过（再点取消）" @click="toggleBatchStatusFilter('pass')">通过 <strong>{{ lastReport.passed }}</strong></button>
+        <button type="button" class="stat-filter fail" :class="{ active: batchStatusFilter === 'fail' }" title="筛选：失败（再点取消）" @click="toggleBatchStatusFilter('fail')">失败 <strong>{{ lastReport.failed }}</strong></button>
+      </p>
       <ul class="result-list">
-        <li v-for="(it, i) in lastReport.items" :key="'b-'+i" :class="{ ok: it.ok, bad: !it.ok }">
+        <li v-for="(it, i) in filteredBatchItems" :key="'b-'+i" :class="{ ok: it.ok, bad: !it.ok }">
           <div class="rel">{{ it.rel_path }}</div>
           <div class="msg">{{ it.message }}</div>
         </li>
@@ -452,5 +482,33 @@ tr.selected { background:#1e2a40; } tr:hover { background:#1a222e; }
 .result-list li.bad { border-color:#7a2e2e; background:#201212; }
 .rel { font-weight:600; }
 .row { display:flex; gap:8px; }
+.batch-search {
+  display:flex; align-items:center; gap:8px; margin-bottom:8px;
+  background:#0f1419; border:1px solid #2a3442; border-radius:10px; padding:6px 10px;
+  transition:border-color .15s, box-shadow .15s;
+}
+.batch-search:focus-within { border-color:#2f5bff; box-shadow:0 0 0 3px #2f5bff33; }
+.batch-search-icon { color:#7a8aa0; font-size:0.95rem; line-height:1; flex:0 0 auto; }
+.batch-search-input {
+  flex:1; min-width:0; background:transparent; border:0; outline:none; color:#e7ecf3;
+  font-size:0.85rem; padding:4px 0;
+}
+.batch-search-input::placeholder { color:#6b7a90; }
+.batch-search-clear {
+  flex:0 0 auto; width:22px; height:22px; border-radius:999px; border:0; cursor:pointer;
+  background:#243044; color:#9aa7b8; font-size:0.95rem; line-height:1; padding:0;
+}
+.batch-search-clear:hover { background:#2f5bff; color:#fff; }
+.stat-filter {
+  appearance:none; background:transparent; border:1px solid transparent; color:inherit;
+  font:inherit; padding:1px 6px; margin:0 2px; border-radius:6px; cursor:pointer; line-height:1.4;
+}
+.stat-filter strong { font-weight:700; }
+.stat-filter.pass, .stat-filter.pass strong { color:#3ecf8e; }
+.stat-filter.fail, .stat-filter.fail strong { color:#ff6b6b; }
+.stat-filter.miss, .stat-filter.miss strong { color:#e6c07b; }
+.stat-filter.err, .stat-filter.err strong { color:#ff9f43; }
+.stat-filter:hover { border-color:#3a4a63; background:#0f1419; }
+.stat-filter.active { border-color:#6d9bff; background:#1a2433; box-shadow:inset 0 0 0 1px #2f5bff55; }
 @media (max-width:960px) { .panes { grid-template-columns:1fr; } .app { height:auto; overflow:auto; } }
 </style>

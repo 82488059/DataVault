@@ -315,7 +315,7 @@ fn verify_controlled_full(
     rel_paths: Option<Vec<String>>,
 ) -> Result<ControlledVerifyReport, String> {
     let root = disk::normalize_drive_root(&drive)?;
-    vault::verify_controlled(&root, "full", rel_paths)
+    vault::verify_controlled(&root, "full", rel_paths, None)
 }
 
 #[tauri::command]
@@ -324,7 +324,7 @@ fn verify_controlled_quick(
     rel_paths: Option<Vec<String>>,
 ) -> Result<ControlledVerifyReport, String> {
     let root = disk::normalize_drive_root(&drive)?;
-    vault::verify_controlled(&root, "quick", rel_paths)
+    vault::verify_controlled(&root, "quick", rel_paths, None)
 }
 
 #[tauri::command]
@@ -451,12 +451,13 @@ fn md5_fast(path: String, sample_ratio: Option<f64>, sample_chunk_mb: Option<i64
     )
 }
 
-#[tauri::command]
-fn backup_paths(
+fn backup_paths_inner(
     app: tauri::AppHandle,
     sources: Vec<String>,
     dest: String,
     batch_name: Option<String>,
+    progress_job_id: Option<String>,
+    cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> Result<BackupBatch, String> {
     if sources.is_empty() {
         return Err("未选择任何源路径".into());
@@ -469,6 +470,7 @@ fn backup_paths(
 
     let batch_id = resolve_batch_id(&app, batch_name)?;
     let mut files_meta: Vec<FileMeta> = Vec::new();
+    let mut progress_idx = 0usize;
 
     for src_str in &sources {
         let src = PathBuf::from(src_str);
@@ -505,6 +507,26 @@ fn backup_paths(
         }
 
         for (abs, rel) in collected {
+            if let Some(flag) = cancel.as_ref() {
+                if job::is_cancelled(flag) {
+                    break;
+                }
+            }
+            progress_idx += 1;
+            let rel_s = rel.to_string_lossy().to_string();
+            if let Some(jid) = progress_job_id.as_ref() {
+                let _ = app.emit(
+                    "backup-job-progress",
+                    GenericProgress {
+                        job_id: jid.clone(),
+                        phase: "copying".into(),
+                        current: progress_idx,
+                        total: 0,
+                        rel_path: Some(rel_s.clone()),
+                        message: format!("正在复制: {rel_s}"),
+                    },
+                );
+            }
             let dest_path = dest_root.join(&rel);
             if let Some(parent) = dest_path.parent() {
                 if let Err(e) = fs::create_dir_all(parent) {
@@ -596,11 +618,12 @@ fn list_batches(app: tauri::AppHandle) -> Result<Vec<String>, String> {
     Ok(ids)
 }
 
-#[tauri::command]
-fn verify_backup(
+fn verify_backup_inner(
     app: tauri::AppHandle,
     batch_id: String,
     mode: String,
+    progress_job_id: Option<String>,
+    cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> Result<VerifyReport, String> {
     let batch = load_batch(app, batch_id.clone())?;
     let use_full = mode == "full" || mode == "完整" || mode == "完整校验";
@@ -608,7 +631,26 @@ fn verify_backup(
     let mut passed = 0usize;
     let mut failed = 0usize;
 
-    for f in &batch.files {
+    let total = batch.files.len();
+    for (i, f) in batch.files.iter().enumerate() {
+        if let Some(flag) = cancel.as_ref() {
+            if job::is_cancelled(flag) {
+                break;
+            }
+        }
+        if let Some(jid) = progress_job_id.as_ref() {
+            let _ = app.emit(
+                "verify-job-progress",
+                GenericProgress {
+                    job_id: jid.clone(),
+                    phase: "verifying".into(),
+                    current: i + 1,
+                    total,
+                    rel_path: Some(f.rel_path.clone()),
+                    message: format!("正在校验 ({}/{total}): {}", i + 1, f.rel_path),
+                },
+            );
+        }
         if f.error.is_some() {
             items.push(VerifyItem {
                 rel_path: f.rel_path.clone(),
@@ -731,6 +773,26 @@ pub struct GenericProgress {
     pub message: String,
 }
 
+
+#[tauri::command]
+fn backup_paths(
+    app: tauri::AppHandle,
+    sources: Vec<String>,
+    dest: String,
+    batch_name: Option<String>,
+) -> Result<BackupBatch, String> {
+    backup_paths_inner(app, sources, dest, batch_name, None, None)
+}
+
+#[tauri::command]
+fn verify_backup(
+    app: tauri::AppHandle,
+    batch_id: String,
+    mode: String,
+) -> Result<VerifyReport, String> {
+    verify_backup_inner(app, batch_id, mode, None, None)
+}
+
 #[tauri::command]
 fn cancel_backup_job() -> Result<bool, String> {
     Ok(job::cancel_kinds(&["backup"]))
@@ -788,7 +850,7 @@ fn start_backup(
                 job::finish_job(&job_id);
                 return;
             }
-            let result = backup_paths(app.clone(), sources, dest, batch_name);
+            let result = backup_paths_inner(app.clone(), sources, dest, batch_name, Some(job_id.clone()), Some(cancel.clone()));
             match result {
                 Ok(batch) => {
                     let cancelled = job::is_cancelled(&cancel);
@@ -920,11 +982,51 @@ fn start_verify_controlled(
             } else {
                 rel_paths
             };
-            let result = if mode == "full" {
-                verify_controlled_full(drive, filter)
-            } else {
-                verify_controlled_quick(drive, filter)
+            let root = match disk::normalize_drive_root(&drive) {
+                Ok(r) => r,
+                Err(e) => {
+                    let _ = app.emit(
+                        "verify-job-finished",
+                        VerifyJobFinished {
+                            job_id: job_id.clone(),
+                            kind: kind_s.clone(),
+                            ok: false,
+                            cancelled: false,
+                            message: e,
+                            controlled: None,
+                            batch: None,
+                        },
+                    );
+                    job::finish_job(&job_id);
+                    return;
+                }
             };
+            let job_id_for_cb = job_id.clone();
+            let app_for_cb = app.clone();
+            let cancel_for_cb = cancel.clone();
+            let mut stop = false;
+            let result = vault::verify_controlled(
+                &root,
+                &mode,
+                filter,
+                Some(&mut |cur, total, path| {
+                    if job::is_cancelled(&cancel_for_cb) {
+                        stop = true;
+                    }
+                    let _ = app_for_cb.emit(
+                        "verify-job-progress",
+                        GenericProgress {
+                            job_id: job_id_for_cb.clone(),
+                            phase: "verifying".into(),
+                            current: cur,
+                            total,
+                            rel_path: Some(path.to_string()),
+                            message: format!("正在校验 ({cur}/{total}): {path}"),
+                        },
+                    );
+                }),
+            );
+            let _ = stop;
             match result {
                 Ok(report) => {
                     let cancelled = job::is_cancelled(&cancel);
@@ -1024,7 +1126,7 @@ fn start_verify_backup(
                 job::finish_job(&job_id);
                 return;
             }
-            match verify_backup(app.clone(), batch_id, mode) {
+            match verify_backup_inner(app.clone(), batch_id, mode, Some(job_id.clone()), Some(cancel.clone())) {
                 Ok(report) => {
                     let cancelled = job::is_cancelled(&cancel);
                     let msg = if cancelled {

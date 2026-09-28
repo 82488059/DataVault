@@ -92,6 +92,48 @@ const errorMsg = ref("");
 const statusMsg = ref("");
 const busy = ref(false);
 const activeJobs = ref<ActiveJob[]>([]);
+interface FinishedTask {
+  job_id: string;
+  kind: string;
+  label: string;
+  ok: boolean;
+  cancelled: boolean;
+  message: string;
+  controlled: ControlledVerifyReport | null;
+  batch: VerifyReport | null;
+}
+const finishedTasks = ref<FinishedTask[]>([]);
+const expandedId = ref<string | null>(null);
+const statusEntries = computed(() => {
+  const running = activeJobs.value.map((j) => ({ ...j, running: true as const }));
+  const done = finishedTasks.value.map((j) => ({
+    job_id: j.job_id,
+    kind: j.kind,
+    label: j.label,
+    phase: j.cancelled ? "cancelled" : (j.ok ? "done" : "failed"),
+    current: 0,
+    total: 0,
+    rel_path: null as string | null,
+    message: j.message,
+    running: false as const,
+    ok: j.ok,
+    cancelled: j.cancelled,
+    controlled: j.controlled,
+    batch: j.batch,
+  }));
+  return [...running, ...done];
+});
+function toggleExpand(id: string) {
+  expandedId.value = expandedId.value === id ? null : id;
+}
+function pushFinished(partial: Omit<FinishedTask, "label"> & { label?: string }) {
+  const label = partial.label || kindLabel(partial.kind);
+  finishedTasks.value = [
+    { ...partial, label },
+    ...finishedTasks.value.filter((x) => x.job_id !== partial.job_id),
+  ].slice(0, 30);
+  expandedId.value = partial.job_id;
+}
 
 const destPath = ref("");
 const batchName = ref("");
@@ -125,14 +167,15 @@ type ControlledStatusFilter = "pass" | "fail" | "missing" | "error";
 const controlledStatusFilter = ref<ControlledStatusFilter | null>(null);
 const batchStatusFilter = ref<"pass" | "fail" | null>(null);
 
+const expandedFinished = computed(() => finishedTasks.value.find((x) => x.job_id === expandedId.value) ?? null);
 const filteredControlledItems = computed(() => {
-  const items = controlledVerify.value?.items ?? [];
+  const items = (expandedFinished.value?.controlled ?? controlledVerify.value)?.items ?? [];
   const f = controlledStatusFilter.value;
   if (!f) return items;
   return items.filter((it) => it.status === f);
 });
 const filteredBatchItems = computed(() => {
-  const items = verifyReport.value?.items ?? [];
+  const items = (expandedFinished.value?.batch ?? verifyReport.value)?.items ?? [];
   const f = batchStatusFilter.value;
   if (!f) return items;
   return items.filter((it) => (f === "pass" ? it.ok : !it.ok));
@@ -189,6 +232,7 @@ function upsertJob(partial: Partial<ActiveJob> & { job_id: string; kind?: string
       rel_path: partial.rel_path ?? null,
       message: partial.message || "",
     });
+    expandedId.value = partial.job_id;
   }
   activeJobs.value = list;
 }
@@ -482,11 +526,14 @@ onMounted(async () => {
       rel_path: p.rel_path,
       message: p.message,
     });
-    statusMsg.value = p.message;
   });
   const u2 = await bind("controlled-job-finished", (p: JobFinished) => {
+    const kind = activeJobs.value.find((j) => j.job_id === p.job_id)?.kind || p.kind;
     removeJob(p.job_id);
-    statusMsg.value = p.message;
+    pushFinished({
+      job_id: p.job_id, kind, ok: p.ok, cancelled: p.cancelled, message: p.message,
+      controlled: null, batch: null,
+    });
     if (!p.ok && !p.cancelled) errorMsg.value = p.message;
   });
   const u3 = await bind("backup-job-progress", (p: JobProgress) => {
@@ -499,11 +546,13 @@ onMounted(async () => {
       rel_path: p.rel_path,
       message: p.message,
     });
-    statusMsg.value = p.message;
   });
   const u4 = await bind("backup-job-finished", (p: BackupJobFinished) => {
     removeJob(p.job_id);
-    statusMsg.value = p.message;
+    pushFinished({
+      job_id: p.job_id, kind: "backup", ok: p.ok, cancelled: p.cancelled, message: p.message,
+      controlled: null, batch: null,
+    });
     if (p.batch) { lastBatch.value = p.batch; verifyBatchId.value = p.batch.id; batchFilter.value = p.batch.id; }
     if (!p.ok && !p.cancelled) errorMsg.value = p.message;
     void refreshBatches();
@@ -517,14 +566,17 @@ onMounted(async () => {
       rel_path: p.rel_path,
       message: p.message,
     });
-    statusMsg.value = p.message;
   });
   const u6 = await bind("verify-job-finished", (p: VerifyJobFinished) => {
+    const kind = activeJobs.value.find((j) => j.job_id === p.job_id)?.kind || p.kind;
     removeJob(p.job_id);
-    statusMsg.value = p.message;
     resetVerifyFilters();
     if (p.controlled) controlledVerify.value = p.controlled;
     if (p.batch) verifyReport.value = p.batch;
+    pushFinished({
+      job_id: p.job_id, kind, ok: p.ok, cancelled: p.cancelled, message: p.message,
+      controlled: p.controlled ?? null, batch: p.batch ?? null,
+    });
     if (!p.ok && !p.cancelled) errorMsg.value = p.message;
   });
   const u7 = await bind("dir-counts-update", (p: DirCountUpdate) => {
@@ -548,24 +600,6 @@ onUnmounted(() => { for (const u of unlisteners) u(); unlisteners = []; });
     </header>
 
     <div v-if="errorMsg" class="banner error">{{ errorMsg }}</div>
-    <div v-if="statusMsg" class="banner ok">{{ statusMsg }}</div>
-    <div v-if="hasJobs" class="banner progress jobs-panel">
-      <div class="jobs-title">进行中的任务（{{ activeJobs.length }}）— 可并行，各自取消</div>
-      <div v-for="j in activeJobs" :key="j.job_id" class="progress-row">
-        <div class="progress-main">
-          <div class="progress-meta">
-            <span><strong>{{ j.label }}</strong> · {{ j.phase }} <span class="job-id">{{ j.job_id }}</span></span>
-            <span v-if="j.total">{{ j.current }} / {{ j.total }}</span>
-          </div>
-          <div class="progress-track">
-            <div class="progress-fill" :style="{ width: progressPct(j) }"></div>
-          </div>
-          <div v-if="j.message" class="progress-file">{{ j.message }}</div>
-          <div v-if="j.rel_path" class="progress-file">{{ j.rel_path }}</div>
-        </div>
-        <button class="btn small" title="取消此任务" @click="doCancelJob(j.job_id)">取消</button>
-      </div>
-    </div>
 
     <div class="layout">
       <section class="panel explorer">
@@ -672,39 +706,71 @@ onUnmounted(() => { for (const u of unlisteners) u(); unlisteners = []; });
       </aside>
     </div>
 
-    <section class="panel results-panel" aria-label="校验结果">
-      <h2>校验结果</h2>
-      <div v-if="controlledVerify" class="verify-summary">
-        <p>受控文件 · {{ controlledVerify.mode === "full" ? "完整" : "快速" }}：
-          <button type="button" class="stat-filter pass" :class="{ active: controlledStatusFilter === 'pass' }" title="筛选：通过（再点取消）" @click="toggleControlledStatusFilter('pass')">通过 <strong>{{ controlledVerify.passed }}</strong></button>
-          <button type="button" class="stat-filter fail" :class="{ active: controlledStatusFilter === 'fail' }" title="筛选：失败（再点取消）" @click="toggleControlledStatusFilter('fail')">失败 <strong>{{ controlledVerify.failed }}</strong></button>
-          <button type="button" class="stat-filter miss" :class="{ active: controlledStatusFilter === 'missing' }" title="筛选：缺失（再点取消）" @click="toggleControlledStatusFilter('missing')">缺失 <strong>{{ controlledVerify.missing }}</strong></button>
-          <button type="button" class="stat-filter err" :class="{ active: controlledStatusFilter === 'error' }" title="筛选：错误（再点取消）" @click="toggleControlledStatusFilter('error')">错误 <strong>{{ controlledVerify.errors }}</strong></button>
-        </p>
-        <ul class="result-list">
-          <li v-for="(it, i) in filteredControlledItems" :key="'c-'+i" :class="{ ok: it.status === 'pass', bad: it.status !== 'pass' }">
-            <div class="rel">{{ it.rel_path }}</div>
-            <div class="msg">{{ it.status }} — {{ it.message }}</div>
-            <div v-if="it.expected" class="hash">期望 {{ it.expected }}</div>
-            <div v-if="it.actual" class="hash">实际 {{ it.actual }}</div>
-          </li>
-        </ul>
+    <section class="panel results-panel" aria-label="状态">
+      <h2>状态</h2>
+      <div v-if="!statusEntries.length" class="muted center empty-results">暂无任务。执行备份/校验/索引后显示于此。</div>
+      <div v-for="j in statusEntries" :key="j.job_id" class="status-item" :class="{ open: expandedId === j.job_id, running: j.running }">
+        <button type="button" class="status-head" @click="toggleExpand(j.job_id)">
+          <span class="status-title">
+            <strong>{{ j.label }}</strong>
+            <span class="job-id">{{ j.job_id }}</span>
+            <span v-if="j.running" class="status-badge run">进行中</span>
+            <span v-else-if="j.cancelled" class="status-badge cancel">已取消</span>
+            <span v-else-if="j.ok" class="status-badge ok">完成</span>
+            <span v-else class="status-badge bad">失败</span>
+          </span>
+          <span class="status-summary">
+            <template v-if="j.running">{{ j.phase }}<template v-if="j.total"> · {{ j.current }}/{{ j.total }}</template></template>
+            <template v-else>{{ j.message }}</template>
+          </span>
+          <span class="status-caret">{{ expandedId === j.job_id ? "▾" : "▸" }}</span>
+        </button>
+        <div v-if="expandedId === j.job_id" class="status-body">
+          <template v-if="j.running">
+            <div class="progress-track">
+              <div class="progress-fill" :style="{ width: progressPct(j) }"></div>
+            </div>
+            <div v-if="j.rel_path" class="progress-file">当前：{{ j.rel_path }}</div>
+            <div v-else-if="j.message" class="progress-file">{{ j.message }}</div>
+            <div class="status-actions">
+              <button class="btn small" title="取消此任务" @click="doCancelJob(j.job_id)">取消</button>
+            </div>
+          </template>
+          <template v-else>
+            <p class="muted small">{{ j.message }}</p>
+            <div v-if="expandedFinished && expandedFinished.job_id === j.job_id && expandedFinished.controlled" class="verify-summary">
+              <p>受控文件 · {{ expandedFinished.controlled.mode === "full" ? "完整" : "快速" }}：
+                <button type="button" class="stat-filter pass" :class="{ active: controlledStatusFilter === 'pass' }" title="筛选：通过（再点取消）" @click="toggleControlledStatusFilter('pass')">通过 <strong>{{ expandedFinished.controlled.passed }}</strong></button>
+                <button type="button" class="stat-filter fail" :class="{ active: controlledStatusFilter === 'fail' }" title="筛选：失败（再点取消）" @click="toggleControlledStatusFilter('fail')">失败 <strong>{{ expandedFinished.controlled.failed }}</strong></button>
+                <button type="button" class="stat-filter miss" :class="{ active: controlledStatusFilter === 'missing' }" title="筛选：缺失（再点取消）" @click="toggleControlledStatusFilter('missing')">缺失 <strong>{{ expandedFinished.controlled.missing }}</strong></button>
+                <button type="button" class="stat-filter err" :class="{ active: controlledStatusFilter === 'error' }" title="筛选：错误（再点取消）" @click="toggleControlledStatusFilter('error')">错误 <strong>{{ expandedFinished.controlled.errors }}</strong></button>
+              </p>
+              <ul class="result-list">
+                <li v-for="(it, i) in filteredControlledItems" :key="'c-'+i" :class="{ ok: it.status === 'pass', bad: it.status !== 'pass' }">
+                  <div class="rel">{{ it.rel_path }}</div>
+                  <div class="msg">{{ it.status }} — {{ it.message }}</div>
+                  <div v-if="it.expected" class="hash">期望 {{ it.expected }}</div>
+                  <div v-if="it.actual" class="hash">实际 {{ it.actual }}</div>
+                </li>
+              </ul>
+            </div>
+            <div v-if="expandedFinished && expandedFinished.job_id === j.job_id && expandedFinished.batch" class="verify-summary">
+              <p>批次 {{ expandedFinished.batch.batch_id }} · {{ expandedFinished.batch.mode === "full" ? "完整" : "快速" }}：
+                <button type="button" class="stat-filter pass" :class="{ active: batchStatusFilter === 'pass' }" title="筛选：通过（再点取消）" @click="toggleBatchStatusFilter('pass')">通过 <strong>{{ expandedFinished.batch.passed }}</strong></button>
+                <button type="button" class="stat-filter fail" :class="{ active: batchStatusFilter === 'fail' }" title="筛选：失败（再点取消）" @click="toggleBatchStatusFilter('fail')">失败 <strong>{{ expandedFinished.batch.failed }}</strong></button>
+              </p>
+              <ul class="result-list">
+                <li v-for="(it, i) in filteredBatchItems" :key="'b-'+i" :class="{ ok: it.ok, bad: !it.ok }">
+                  <div class="rel">{{ it.rel_path }}</div>
+                  <div class="msg">{{ it.message }}</div>
+                  <div v-if="it.src_hash" class="hash">源 {{ it.src_hash }}</div>
+                  <div v-if="it.dest_hash" class="hash">目标 {{ it.dest_hash }}</div>
+                </li>
+              </ul>
+            </div>
+          </template>
+        </div>
       </div>
-      <div v-if="verifyReport" class="verify-summary">
-        <p>批次 {{ verifyReport.batch_id }} · {{ verifyReport.mode === "full" ? "完整" : "快速" }}：
-          <button type="button" class="stat-filter pass" :class="{ active: batchStatusFilter === 'pass' }" title="筛选：通过（再点取消）" @click="toggleBatchStatusFilter('pass')">通过 <strong>{{ verifyReport.passed }}</strong></button>
-          <button type="button" class="stat-filter fail" :class="{ active: batchStatusFilter === 'fail' }" title="筛选：失败（再点取消）" @click="toggleBatchStatusFilter('fail')">失败 <strong>{{ verifyReport.failed }}</strong></button>
-        </p>
-        <ul class="result-list">
-          <li v-for="(it, i) in filteredBatchItems" :key="'b-'+i" :class="{ ok: it.ok, bad: !it.ok }">
-            <div class="rel">{{ it.rel_path }}</div>
-            <div class="msg">{{ it.message }}</div>
-            <div v-if="it.src_hash" class="hash">源 {{ it.src_hash }}</div>
-            <div v-if="it.dest_hash" class="hash">目标 {{ it.dest_hash }}</div>
-          </li>
-        </ul>
-      </div>
-      <p v-if="!controlledVerify && !verifyReport" class="muted center empty-results">暂无校验结果。在上方执行受控/批次校验后显示于此。</p>
     </section>
   </div>
 </template>
@@ -809,4 +875,23 @@ input[type="text"], select { background:#0f1419; border:1px solid #2a3442; color
 @media (max-width:1000px) { .layout { grid-template-columns:1fr; } .explorer { height:auto; min-height:0; max-height:50vh; } .side { height:auto; align-self:stretch; overflow:visible; } }
 .progress-row { display:flex; align-items:center; gap:12px; }
 .progress-main { flex:1; min-width:0; }
+.status-item { border:1px solid #2a3442; border-radius:10px; margin-top:6px; background:#121820; overflow:hidden; }
+.status-item.running { border-color:#2f5bff; }
+.status-item.open { border-color:#3a4a63; }
+.status-head {
+  width:100%; display:flex; align-items:center; gap:10px; text-align:left; cursor:pointer;
+  background:transparent; border:0; color:inherit; padding:8px 10px; font:inherit;
+}
+.status-head:hover { background:#1a222e; }
+.status-title { display:flex; align-items:center; gap:8px; flex:0 1 auto; min-width:0; flex-wrap:wrap; }
+.status-summary { flex:1; min-width:0; color:#9aa7b8; font-size:0.78rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.status-caret { color:#7a8aa0; flex:0 0 auto; }
+.status-body { padding:0 10px 10px; border-top:1px solid #243041; }
+.status-actions { margin-top:8px; }
+.status-badge { font-size:0.68rem; padding:1px 7px; border-radius:999px; border:1px solid #3a4a63; color:#9aa7b8; }
+.status-badge.run { border-color:#2f5bff; color:#9db4ff; }
+.status-badge.ok { border-color:#2d6a45; color:#6dffa0; }
+.status-badge.bad { border-color:#7a2e2e; color:#ff8f8f; }
+.status-badge.cancel { border-color:#6b5a2a; color:#e6c07b; }
+.results-panel { max-height:min(560px, 55vh); }
 </style>

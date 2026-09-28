@@ -306,6 +306,7 @@ pub fn verify_controlled(
     drive_root: &Path,
     mode: &str,
     rel_paths: Option<Vec<String>>,
+    mut on_progress: Option<&mut dyn FnMut(usize, usize, &str)>,
 ) -> Result<ControlledVerifyReport, String> {
     if !disk::is_backup_disk(drive_root) {
         return Err("当前盘不是 DataVault 受控盘".into());
@@ -332,7 +333,11 @@ pub fn verify_controlled(
     let mut missing = 0usize;
     let mut errors = 0usize;
 
-    for row in targets {
+    let total = targets.len();
+    for (i, row) in targets.into_iter().enumerate() {
+        if let Some(cb) = on_progress.as_mut() {
+            cb(i + 1, total, &row.rel_path);
+        }
         let abs = drive_root.join(&row.rel_path);
         if !abs.exists() {
             missing += 1;

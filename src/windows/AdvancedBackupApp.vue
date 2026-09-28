@@ -247,7 +247,7 @@ onMounted(async () => {
   await bind("backup-job-progress", (p: JobProgress) => { progress.value = p; });
   await bind("backup-job-finished", (p: BackupJobFinished) => {
     progress.value = null;
-    statusMsg.value = p.message || (p.ok ? "备份完成" : "备份结束");
+    statusMsg.value = "";
     if (p.batch) lastBatch.value = p.batch;
   });
   await bind("dir-counts-update", (p: DirCountUpdate) => {
@@ -263,14 +263,13 @@ onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } })
     <header class="header">
       <div>
         <h1>高级备份 <span class="sub">DataVault</span></h1>
-        <p class="hint">左侧多选源（含全部盘符）；右侧浏览全部文件/文件夹，仅可单选文件夹作为目标。源与目标不可同一盘符。</p>
+        <p class="hint">左侧多选源；右侧浏览全部文件/文件夹，仅可单选文件夹作为目标。源与目标不可同一盘符。</p>
       </div>
       <button class="btn primary" title="将左侧勾选复制到右侧所选目标文件夹" :disabled="!canBackup" @click="doBackup">开始备份</button>
     </header>
 
     <p v-if="errorMsg" class="banner error">{{ errorMsg }}</p>
     <p v-if="sameDriveConflict" class="banner error">源与目标在同一盘符，请更换目标或取消同盘源项。</p>
-    <p v-if="statusMsg" class="banner ok">{{ statusMsg }}</p>
     <div v-if="progress" class="banner progress">
       <div class="progress-meta">
         <span>{{ progress.phase }} · {{ progress.job_id }}</span>
