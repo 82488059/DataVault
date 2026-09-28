@@ -142,7 +142,7 @@ pub fn upsert_controlled_file(
     sample_chunk_mb: i64,
 ) -> Result<ControlledFile, String> {
     if !disk::is_backup_disk(drive_root) {
-        return Err("当前盘不是 DataVault 备份盘，请先标记".into());
+        return Err("当前盘不是 DataVault 受控盘，请先标记".into());
     }
     if !abs_path.is_file() {
         return Err(format!("不是文件: {}", abs_path.display()));
@@ -269,7 +269,7 @@ pub fn collect_files_under(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), Str
 
 pub fn list_controlled_files(drive_root: &Path) -> Result<Vec<ControlledFile>, String> {
     if !disk::is_backup_disk(drive_root) {
-        return Err("当前盘不是 DataVault 备份盘".into());
+        return Err("当前盘不是 DataVault 受控盘".into());
     }
     let conn = open_db(drive_root)?;
     let mut stmt = conn
@@ -308,7 +308,7 @@ pub fn verify_controlled(
     rel_paths: Option<Vec<String>>,
 ) -> Result<ControlledVerifyReport, String> {
     if !disk::is_backup_disk(drive_root) {
-        return Err("当前盘不是 DataVault 备份盘".into());
+        return Err("当前盘不是 DataVault 受控盘".into());
     }
     let use_full = matches!(mode, "full" | "完整" | "完整校验");
     let all = list_controlled_files(drive_root)?;
@@ -455,7 +455,7 @@ pub fn resolve_controlled_selection(
     paths: &[String],
 ) -> Result<Vec<ControlledFile>, String> {
     if !disk::is_backup_disk(drive_root) {
-        return Err("当前盘不是 DataVault 备份盘".into());
+        return Err("当前盘不是 DataVault 受控盘".into());
     }
     if paths.is_empty() {
         return Ok(Vec::new());

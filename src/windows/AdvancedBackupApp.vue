@@ -6,6 +6,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 interface DirEntry {
   name: string; path: string; is_dir: boolean; size: number;
   is_backup_disk: boolean; is_controlled: boolean;
+  controlled_count?: number | null; total_files?: number | null;
 }
 interface JobStart { job_id: string; total: number; kind: string; }
 interface JobProgress {
@@ -24,6 +25,26 @@ interface BackupJobFinished {
 const srcPath = ref("");
 const dstPath = ref("");
 const srcEntries = ref<DirEntry[]>([]);
+
+interface DirCountUpdate {
+  job_id: number; path: string; controlled_count: number; total_files: number;
+}
+const dirCountsJobId = ref(0);
+function applyDirCount(path: string, controlled_count: number, total_files: number) {
+  const list = srcEntries.value;
+  const i = list.findIndex((e) => e.path === path);
+  if (i < 0) return;
+  const next = list.slice();
+  next[i] = { ...next[i], controlled_count, total_files };
+  srcEntries.value = next;
+    void requestDirFileCounts(srcEntries.value);
+}
+async function requestDirFileCounts(list: DirEntry[]) {
+  const paths = list.filter((e) => e.is_dir && e.is_controlled).map((e) => e.path);
+  if (!paths.length) { dirCountsJobId.value = 0; return; }
+  try { dirCountsJobId.value = await invoke<number>("start_dir_file_counts", { paths }); } catch { /* ignore */ }
+}
+
 const dstEntries = ref<DirEntry[]>([]);
 const srcSelected = ref<Set<string>>(new Set());
 const dstSelected = ref<string>(""); // single path
@@ -67,6 +88,7 @@ async function loadSrc(path: string) {
       const drives = await invoke<DirEntry[]>("list_drives");
       // Source pane: exclude already-marked backup disks (dest side only).
       srcEntries.value = drives.filter((d) => !d.is_backup_disk);
+    void requestDirFileCounts(srcEntries.value);
     } else {
       const raw = await invoke<DirEntry[]>("list_dir", { path });
       srcEntries.value = raw.filter((e) => e.name.toLowerCase() !== ".datavault");
@@ -90,7 +112,7 @@ async function loadDst(path: string) {
     }
     const drive = normDrive(path);
     if (!drive || ![...backupRoots.value].some((r) => r === drive || r.startsWith(drive))) {
-      errorMsg.value = "目标只能选择已标记的备份盘或其子目录";
+      errorMsg.value = "目标只能选择已标记的受控盘或其子目录";
       return;
     }
     const raw = await invoke<DirEntry[]>("list_dir", { path });
@@ -151,7 +173,7 @@ function pickDst(e: DirEntry) {
   if (!(e.is_dir || e.is_backup_disk || isDriveRoot(e.path))) return;
   const drive = normDrive(e.path);
   if (![...backupRoots.value].some((r) => r === drive)) {
-    errorMsg.value = "目标必须是备份盘或其子目录";
+    errorMsg.value = "目标必须是受控盘或其子目录";
     return;
   }
   dstSelected.value = e.path.endsWith("\\") || e.path.endsWith("/") ? e.path : (e.is_dir || isDriveRoot(e.path) ? e.path + (e.path.includes("/") ? "/" : "\\") : e.path);
@@ -164,10 +186,10 @@ async function doBackup() {
   const sources = Array.from(srcSelected.value);
   const dest = dstSelected.value.trim();
   if (!sources.length) { errorMsg.value = "请在左侧勾选备份源"; return; }
-  if (!dest) { errorMsg.value = "请在右侧单选备份目标（备份盘或子目录）"; return; }
+  if (!dest) { errorMsg.value = "请在右侧单选备份目标（受控盘或子目录）"; return; }
   const drive = normDrive(dest);
   if (![...backupRoots.value].some((r) => r === drive)) {
-    errorMsg.value = "目标必须位于已标记的备份盘"; return;
+    errorMsg.value = "目标必须位于已标记的受控盘"; return;
   }
   busy.value = true;
   try {
@@ -194,6 +216,10 @@ onMounted(async () => {
     statusMsg.value = p.message || (p.ok ? "备份完成" : "备份结束");
     if (p.batch) lastBatch.value = p.batch;
   });
+  await bind("dir-counts-update", (p: DirCountUpdate) => {
+    if (p.job_id !== dirCountsJobId.value) return;
+    applyDirCount(p.path, p.controlled_count, p.total_files);
+  });
 });
 onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } });
 </script>
@@ -203,7 +229,7 @@ onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } })
     <header class="header">
       <div>
         <h1>高级备份 <span class="sub">DataVault</span></h1>
-        <p class="hint">左侧多选源（不含已标记备份盘）；右侧仅可单选备份盘或其子目录作为目标。</p>
+        <p class="hint">左侧多选源（不含已标记受控盘）；右侧仅可单选受控盘或其子目录作为目标。</p>
       </div>
       <button class="btn primary" title="将左侧勾选复制到右侧所选目标" :disabled="!canBackup" @click="doBackup">开始备份</button>
     </header>
@@ -251,8 +277,11 @@ onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } })
                 </td>
                 <td>{{ e.is_dir || e.is_backup_disk || isDriveRoot(e.path) ? "文件夹" : "文件" }}</td>
                 <td>{{ e.is_dir || e.is_backup_disk || isDriveRoot(e.path) ? "—" : formatSize(e.size) }}</td>
-                <td><span v-if="e.is_backup_disk" class="badge backup">备份盘</span></td>
-                <td><span v-if="e.is_controlled" class="badge controlled" title="已在 vault.db 登记">受控</span></td>
+                <td><span v-if="e.is_backup_disk" class="badge backup">受控盘</span></td>
+                <td>
+                  <span v-if="e.is_dir && e.is_controlled" class="badge controlled" title="受控文件数/总文件数">{{ e.controlled_count != null && e.total_files != null ? e.controlled_count + '/' + e.total_files : '…' }}</span>
+                  <span v-else-if="e.is_controlled" class="badge controlled" title="已在 vault.db 登记">受控</span>
+                </td>
               </tr>
               <tr v-if="!srcEntries.length"><td colspan="6" class="muted center">空目录或无法访问</td></tr>
             </tbody>
@@ -261,13 +290,13 @@ onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } })
       </section>
 
       <section class="panel pane">
-        <h2>目标（单选 · 仅备份盘）</h2>
+        <h2>目标（单选 · 仅受控盘）</h2>
         <div class="toolbar">
           <button class="btn small" :disabled="!dstPath" @click="dstUp">上级</button>
-          <button class="btn small" @click="loadDst('')">备份盘符</button>
+          <button class="btn small" @click="loadDst('')">受控盘符</button>
           <span class="muted">{{ dstSelected ? "已选 " + dstSelected : "未选目标" }}</span>
         </div>
-        <code class="path">{{ dstPath || "备份盘列表" }}</code>
+        <code class="path">{{ dstPath || "受控盘列表" }}</code>
         <div class="table-wrap">
           <table>
             <thead>
@@ -287,10 +316,10 @@ onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } })
                   <span class="icon" aria-hidden="true">📁</span>{{ e.name || e.path }}
                 </td>
                 <td>文件夹</td>
-                <td><span v-if="e.is_backup_disk" class="badge backup">备份盘</span></td>
+                <td><span v-if="e.is_backup_disk" class="badge backup">受控盘</span></td>
               </tr>
               <tr v-if="!dstEntries.length && !dstPath">
-                <td colspan="4" class="muted center">无可用备份盘。请先在主窗口「标记为备份盘」。</td>
+                <td colspan="4" class="muted center">无可用受控盘。请先在主窗口「标记为受控」。</td>
               </tr>
               <tr v-if="!dstEntries.length && dstPath" class="selected dest-here-row">
                 <td colspan="4" class="muted center dest-here">

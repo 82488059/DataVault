@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use tauri::{Emitter, Manager};
 
@@ -33,6 +34,10 @@ pub struct DirEntryInfo {
     pub is_backup_disk: bool,
     /// File: recorded in vault.db. Dir: at least one controlled file under it.
     pub is_controlled: bool,
+    /// For controlled dirs: filled asynchronously (受控文件数).
+    pub controlled_count: Option<u64>,
+    /// For controlled dirs: filled asynchronously (总文件数 under dir).
+    pub total_files: Option<u64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -240,7 +245,7 @@ fn mark_backup_disk(drive: String) -> Result<DiskJson, String> {
         chars.len() == 2 && chars[1] == ':' && chars[0].is_ascii_alphabetic()
     };
     if !is_root {
-        return Err("只能标记盘符根目录为备份盘（例如 E:\\），不能标记子目录".into());
+        return Err("只能标记盘符根目录为受控盘（例如 E:\\），不能标记子目录".into());
     }
     let root = disk::normalize_drive_root(&drive)?;
     disk::mark_backup_disk(&root)
@@ -334,6 +339,8 @@ fn list_dir(path: String) -> Result<Vec<DirEntryInfo>, String> {
                     size: 0,
                     is_backup_disk: d.is_backup_disk,
                     is_controlled: false,
+                    controlled_count: None,
+                    total_files: None,
                 })
                 .collect()
         });
@@ -411,6 +418,8 @@ fn list_dir(path: String) -> Result<Vec<DirEntryInfo>, String> {
             size,
             is_backup_disk: false,
             is_controlled,
+            controlled_count: None,
+            total_files: None,
         });
     }
     items.sort_by(|a, b| match (a.is_dir, b.is_dir) {
@@ -1071,6 +1080,151 @@ fn start_verify_backup(
 }
 
 
+
+/// Monotonic job id for directory file-count updates. Newer start cancels older.
+static DIR_COUNTS_JOB: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DirCountUpdate {
+    pub job_id: u64,
+    pub path: String,
+    pub controlled_count: u64,
+    pub total_files: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DirCountsFinished {
+    pub job_id: u64,
+    pub ok: bool,
+    pub cancelled: bool,
+    pub message: String,
+}
+
+/// Recursively count files under `dir`, skipping `.datavault`. Returns None if job cancelled.
+fn count_files_under(dir: &Path, my_id: u64) -> Option<u64> {
+    let mut n = 0u64;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(p) = stack.pop() {
+        if DIR_COUNTS_JOB.load(Ordering::SeqCst) != my_id {
+            return None;
+        }
+        let rd = match fs::read_dir(&p) {
+            Ok(rd) => rd,
+            Err(_) => continue,
+        };
+        for ent in rd.flatten() {
+            if DIR_COUNTS_JOB.load(Ordering::SeqCst) != my_id {
+                return None;
+            }
+            let name = ent.file_name().to_string_lossy().to_string();
+            if name.eq_ignore_ascii_case(disk::META_DIR) {
+                continue;
+            }
+            let ep = ent.path();
+            if ep.is_dir() {
+                stack.push(ep);
+            } else {
+                n += 1;
+            }
+        }
+    }
+    Some(n)
+}
+
+fn controlled_files_under(root: &Path, dir: &Path) -> u64 {
+    let Ok(rel) = vault::normalize_rel_path(root, dir) else {
+        return 0;
+    };
+    let rel_l = rel.to_lowercase();
+    let prefix = format!("{rel_l}\\");
+    let files = vault::list_controlled_files(root).unwrap_or_default();
+    files
+        .iter()
+        .filter(|f| {
+            let c = f.rel_path.to_lowercase();
+            c == rel_l || c.starts_with(&prefix)
+        })
+        .count() as u64
+}
+
+/// Start async counts for controlled directories. At most one job; newer call cancels previous.
+#[tauri::command]
+fn start_dir_file_counts(app: tauri::AppHandle, paths: Vec<String>) -> Result<u64, String> {
+    let job_id = DIR_COUNTS_JOB.fetch_add(1, Ordering::SeqCst) + 1;
+    let paths: Vec<String> = paths
+        .into_iter()
+        .filter(|p| !p.trim().is_empty())
+        .collect();
+    if paths.is_empty() {
+        return Ok(job_id);
+    }
+    std::thread::Builder::new()
+        .name("datavault-dir-counts".into())
+        .spawn(move || {
+            for path in paths {
+                if DIR_COUNTS_JOB.load(Ordering::SeqCst) != job_id {
+                    let _ = app.emit(
+                        "dir-counts-finished",
+                        DirCountsFinished {
+                            job_id,
+                            ok: false,
+                            cancelled: true,
+                            message: "已取消".into(),
+                        },
+                    );
+                    return;
+                }
+                let p = PathBuf::from(&path);
+                if !p.is_dir() {
+                    continue;
+                }
+                let controlled = if let Some(root) = disk::drive_root_of(&p) {
+                    if disk::is_backup_disk(&root) {
+                        controlled_files_under(&root, &p)
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                };
+                let Some(total) = count_files_under(&p, job_id) else {
+                    let _ = app.emit(
+                        "dir-counts-finished",
+                        DirCountsFinished {
+                            job_id,
+                            ok: false,
+                            cancelled: true,
+                            message: "已取消".into(),
+                        },
+                    );
+                    return;
+                };
+                let _ = app.emit(
+                    "dir-counts-update",
+                    DirCountUpdate {
+                        job_id,
+                        path,
+                        controlled_count: controlled,
+                        total_files: total,
+                    },
+                );
+            }
+            if DIR_COUNTS_JOB.load(Ordering::SeqCst) == job_id {
+                let _ = app.emit(
+                    "dir-counts-finished",
+                    DirCountsFinished {
+                        job_id,
+                        ok: true,
+                        cancelled: false,
+                        message: "完成".into(),
+                    },
+                );
+            }
+        })
+        .map_err(|e| format!("无法启动目录计数线程: {e}"))?;
+    Ok(job_id)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1090,6 +1244,7 @@ pub fn run() {
             verify_controlled_full,
             verify_controlled_quick,
             list_dir,
+            start_dir_file_counts,
             md5_full,
             md5_quick,
             md5_fast,

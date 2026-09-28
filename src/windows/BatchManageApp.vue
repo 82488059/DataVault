@@ -6,6 +6,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 interface DirEntry {
   name: string; path: string; is_dir: boolean; size: number;
   is_backup_disk: boolean; is_controlled: boolean;
+  controlled_count?: number | null; total_files?: number | null;
 }
 interface FileMeta {
   rel_path: string; src_path: string; dest_path: string;
@@ -62,6 +63,26 @@ const unlisteners: UnlistenFn[] = [];
 
 const dirPath = ref("");
 const dirEntries = ref<DirEntry[]>([]);
+
+interface DirCountUpdate {
+  job_id: number; path: string; controlled_count: number; total_files: number;
+}
+const dirCountsJobId = ref(0);
+function applyDirCount(path: string, controlled_count: number, total_files: number) {
+  const list = dirEntries.value;
+  const i = list.findIndex((e) => e.path === path);
+  if (i < 0) return;
+  const next = list.slice();
+  next[i] = { ...next[i], controlled_count, total_files };
+  dirEntries.value = next;
+    void requestDirFileCounts(dirEntries.value);
+}
+async function requestDirFileCounts(list: DirEntry[]) {
+  const paths = list.filter((e) => e.is_dir && e.is_controlled).map((e) => e.path);
+  if (!paths.length) { dirCountsJobId.value = 0; return; }
+  try { dirCountsJobId.value = await invoke<number>("start_dir_file_counts", { paths }); } catch { /* ignore */ }
+}
+
 const dirSelected = ref<Set<string>>(new Set());
 
 function driveOf(dest: string): string {
@@ -100,7 +121,7 @@ function timeOf(b: BackupBatch): string {
 
 const hasSelection = computed(() => selected.value.size > 0);
 const hasDirSelection = computed(() => dirSelected.value.size > 0);
-const dirPathLabel = computed(() => dirPath.value || "备份盘列表");
+const dirPathLabel = computed(() => dirPath.value || "受控盘列表");
 
 async function refresh() {
   errorMsg.value = "";
@@ -140,12 +161,14 @@ async function loadDir(path: string) {
       const drives = await invoke<DirEntry[]>("list_drives");
       // Only already-marked backup disks
       dirEntries.value = drives.filter((d) => d.is_backup_disk);
+    void requestDirFileCounts(dirEntries.value);
     } else {
       const raw = await invoke<DirEntry[]>("list_dir", { path });
       // Only controlled files / dirs containing controlled paths
       dirEntries.value = raw.filter(
         (e) => e.name.toLowerCase() !== ".datavault" && e.is_controlled,
       );
+    void requestDirFileCounts(dirEntries.value);
     }
     dirPath.value = path;
     dirSelected.value = new Set();
@@ -188,9 +211,9 @@ async function doVerifyDir(mode: "full" | "quick") {
   const sel = Array.from(dirSelected.value);
   if (!sel.length) { errorMsg.value = "请先在目录列表勾选要校验的目录或文件"; return; }
   const drive = resolveDirDrive();
-  if (!drive) { errorMsg.value = "请勾选同一备份盘下的路径，或先进入该备份盘"; return; }
+  if (!drive) { errorMsg.value = "请勾选同一受控盘下的路径，或先进入该受控盘"; return; }
   for (const p of sel) {
-    if (normDrive(p) !== drive) { errorMsg.value = "勾选的路径须属于同一备份盘"; return; }
+    if (normDrive(p) !== drive) { errorMsg.value = "勾选的路径须属于同一受控盘"; return; }
   }
   busy.value = true;
   try {
@@ -234,6 +257,11 @@ onMounted(async () => {
     statusMsg.value = p.message || (p.ok ? "校验完成" : "校验结束");
     void refresh();
   });
+  await bind("dir-counts-update", (p: DirCountUpdate) => {
+    if (p.job_id !== dirCountsJobId.value) return;
+    applyDirCount(p.path, p.controlled_count, p.total_files);
+  });
+
 });
 onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } });
 </script>
@@ -243,7 +271,7 @@ onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } })
     <header class="header">
       <div>
         <h1>高级校验 <span class="sub">DataVault</span></h1>
-        <p class="hint">按目录校验受控文件，或勾选备份批次做快/完整校验。仅显示已标记备份盘及受控路径。</p>
+        <p class="hint">按目录校验受控文件，或勾选备份批次做快/完整校验。仅显示已标记受控盘及受控路径。</p>
       </div>
       <div class="row">
         <button class="btn small" title="刷新批次列表" @click="refresh">刷新批次</button>
@@ -267,10 +295,10 @@ onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } })
     <div class="panes">
       <section class="panel pane">
         <h2>按目录校验（受控）</h2>
-        <p class="muted small">仅列出备份盘及含受控文件的目录/文件。勾选后快速/完整校验对应受控项。</p>
+        <p class="muted small">仅列出受控盘及含受控文件的目录/文件。勾选后快速/完整校验对应受控项。</p>
         <div class="toolbar">
           <button class="btn small" :disabled="!dirPath" @click="dirUp">上级</button>
-          <button class="btn small" @click="loadDir('')">备份盘符</button>
+          <button class="btn small" @click="loadDir('')">受控盘符</button>
           <button class="btn small" @click="selectDirAll">全选</button>
           <button class="btn small" @click="clearDirSel">清空</button>
           <button class="btn small primary" title="对勾选路径下受控文件快速校验" :disabled="!hasDirSelection || busy" @click="doVerifyDir('quick')">快速校验</button>
@@ -294,11 +322,14 @@ onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } })
                 </td>
                 <td>{{ e.is_dir || e.is_backup_disk || isDriveRoot(e.path) ? "文件夹" : "文件" }}</td>
                 <td>{{ e.is_dir || e.is_backup_disk ? "—" : formatSize(e.size) }}</td>
-                <td><span v-if="e.is_backup_disk" class="badge backup">备份盘</span></td>
-                <td><span v-if="e.is_controlled" class="badge controlled" title="已在 vault.db 登记">受控</span></td>
+                <td><span v-if="e.is_backup_disk" class="badge backup">受控盘</span></td>
+                <td>
+                  <span v-if="e.is_dir && e.is_controlled" class="badge controlled" title="受控文件数/总文件数">{{ e.controlled_count != null && e.total_files != null ? e.controlled_count + '/' + e.total_files : '…' }}</span>
+                  <span v-else-if="e.is_controlled" class="badge controlled" title="已在 vault.db 登记">受控</span>
+                </td>
               </tr>
               <tr v-if="!dirEntries.length">
-                <td colspan="6" class="muted center">{{ dirPath ? "此目录下无受控项" : "无备份盘。请先在主窗口「标记为备份盘」。" }}</td>
+                <td colspan="6" class="muted center">{{ dirPath ? "此目录下无受控项" : "无受控盘。请先在主窗口「标记为受控」。" }}</td>
               </tr>
             </tbody>
           </table>

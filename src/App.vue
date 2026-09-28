@@ -271,10 +271,10 @@ async function doMarkBackupDisk() {
     return;
   }
   busy.value = true;
-  statusMsg.value = "正在标记备份盘…";
+  statusMsg.value = "正在标记受控盘…";
   try {
     await invoke("mark_backup_disk", { drive: target });
-    statusMsg.value = `已标记备份盘：${target}`;
+    statusMsg.value = `已标记受控盘：${target}`;
     await refreshBackupDrives();
     currentIsBackup.value = true;
     await refreshControlled();
@@ -291,7 +291,7 @@ async function doAddControlled() {
   errorMsg.value = "";
   statusMsg.value = "";
   if (!currentIsBackup.value || !currentDrive.value) {
-    errorMsg.value = "请先将当前盘标记为备份盘";
+    errorMsg.value = "请先将当前盘标记为受控";
     return;
   }
   if (selected.value.size === 0) {
@@ -305,7 +305,7 @@ async function doAddControlled() {
   const drive = currentDrive.value.toUpperCase();
   for (const p of selected.value) {
     if (!p.toUpperCase().startsWith(drive.replace(/\$/, ""))) {
-      errorMsg.value = "受控文件必须位于当前备份盘上";
+      errorMsg.value = "受控文件必须位于当前受控盘上";
       return;
     }
   }
@@ -329,7 +329,7 @@ async function doIndexBackupDisk() {
   errorMsg.value = "";
   statusMsg.value = "";
   if (!currentIsBackup.value || !currentDrive.value) {
-    errorMsg.value = "请先进入已标记的备份盘";
+    errorMsg.value = "请先进入已标记的受控盘";
     return;
   }
   if (jobRunning.value) {
@@ -339,7 +339,7 @@ async function doIndexBackupDisk() {
   try {
     jobRunning.value = true;
     jobProgress.value = null;
-    statusMsg.value = "正在扫描备份盘并建立索引…";
+    statusMsg.value = "正在扫描受控盘并建立索引…";
     const start = await invoke<JobStart>("start_index_backup_disk", {
       drive: currentDrive.value,
     });
@@ -371,7 +371,7 @@ async function doVerifyControlled(mode: "full" | "quick") {
   errorMsg.value = "";
   statusMsg.value = "";
   if (!currentIsBackup.value || !currentDrive.value) {
-    errorMsg.value = "当前不是备份盘";
+    errorMsg.value = "当前不是受控盘";
     return;
   }
   busy.value = true;
@@ -481,8 +481,8 @@ onUnmounted(() => {
       <div>
         <h1>数据管理 <span class="sub">DataVault</span></h1>
         <p class="hint">
-          备份盘 · 受控文件 · 完整 MD5 / FastMD5 校验
-          <span v-if="currentIsBackup" class="badge backup">备份盘 {{ currentDrive }}</span>
+          受控盘 · 受控文件 · 完整 MD5 / FastMD5 校验
+          <span v-if="currentIsBackup" class="badge backup">受控盘 {{ currentDrive }}</span>
         </p>
       </div>
       <div class="header-actions">
@@ -523,7 +523,7 @@ onUnmounted(() => {
           <button class="btn small" @click="selected = new Set()">清空选择</button>
           <button class="btn small" @click="useCurrentAsDest">将当前目录设为目标</button>
           <button class="btn small primary-outline" :disabled="busy" @click="doMarkBackupDisk">
-            标记为备份盘
+            标记为受控
           </button>
           <button
             class="btn small primary-outline"
@@ -536,7 +536,7 @@ onUnmounted(() => {
             class="btn small primary-outline"
             :disabled="jobRunning || !currentIsBackup"
             @click="doIndexBackupDisk"
-            title="扫描当前备份盘上已有文件，计算 MD5/FastMD5 写入 vault.db"
+            title="扫描当前受控盘上已有文件，计算 MD5/FastMD5 写入 vault.db"
           >
             建立备份索引
           </button>
@@ -581,7 +581,7 @@ onUnmounted(() => {
                 <td>{{ e.is_dir || isDriveRootPath(e.path) ? "文件夹" : "文件" }}</td>
                 <td>{{ e.is_dir || isDriveRootPath(e.path) ? "—" : formatSize(e.size) }}</td>
                 <td>
-                  <span v-if="e.is_backup_disk" class="badge backup">备份盘</span>
+                  <span v-if="e.is_backup_disk" class="badge backup">受控盘</span>
                 </td>
               </tr>
               <tr v-if="!entries.length">
@@ -594,9 +594,9 @@ onUnmounted(() => {
 
       <aside class="side">
         <section class="panel">
-          <h2>受控文件 <span v-if="currentIsBackup" class="badge backup">备份盘</span></h2>
+          <h2>受控文件 <span v-if="currentIsBackup" class="badge backup">受控盘</span></h2>
           <p v-if="!currentIsBackup" class="muted small">
-            进入盘符后点击「标记为备份盘」，再勾选文件「添加受控文件」。
+            进入盘符后点击「标记为受控」，再勾选文件「添加受控文件」。
           </p>
           <template v-else>
             <p class="muted small">

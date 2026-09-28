@@ -7,6 +7,7 @@ import { openAdvancedVerifyWindow, openAdvancedBackupWindow } from "../bridge";
 interface DirEntryInfo {
   name: string; path: string; is_dir: boolean; size: number;
   is_backup_disk: boolean; is_controlled: boolean;
+  controlled_count?: number | null; total_files?: number | null;
 }
 interface FileMeta {
   rel_path: string; src_path: string; dest_path: string; size: number;
@@ -63,6 +64,29 @@ interface ActiveJob {
 
 const currentPath = ref("");
 const entries = ref<DirEntryInfo[]>([]);
+
+interface DirCountUpdate {
+  job_id: number; path: string; controlled_count: number; total_files: number;
+}
+const dirCountsJobId = ref(0);
+
+function applyDirCount(path: string, controlled_count: number, total_files: number) {
+  const list = entries.value;
+  const i = list.findIndex((e) => e.path === path);
+  if (i < 0) return;
+  const next = list.slice();
+  next[i] = { ...next[i], controlled_count, total_files };
+  entries.value = next;
+}
+
+async function requestDirFileCounts(list: DirEntryInfo[]) {
+  const paths = list.filter((e) => e.is_dir && e.is_controlled).map((e) => e.path);
+  if (!paths.length) { dirCountsJobId.value = 0; return; }
+  try {
+    dirCountsJobId.value = await invoke<number>("start_dir_file_counts", { paths });
+  } catch { /* ignore */ }
+}
+
 const selected = ref<Set<string>>(new Set());
 const errorMsg = ref("");
 const statusMsg = ref("");
@@ -249,6 +273,7 @@ async function loadDir(path: string) {
   try {
     const raw = await invoke<DirEntryInfo[]>("list_dir", { path });
     entries.value = raw.filter((e) => e.name.toLowerCase() !== ".datavault");
+    void requestDirFileCounts(entries.value);
     currentPath.value = path;
     selected.value = new Set();
     await refreshBackupDrives();
@@ -302,20 +327,20 @@ async function doMarkBackupDisk() {
   if (!currentPath.value) {
     if (selected.value.size !== 1) { errorMsg.value = "请在盘符列表中勾选一个盘符根（不可对子目录标记）"; return; }
     target = Array.from(selected.value)[0];
-    if (!isDriveRootPath(target)) { errorMsg.value = "只能标记盘符根目录为备份盘，不能标记子目录"; return; }
+    if (!isDriveRootPath(target)) { errorMsg.value = "只能标记盘符根目录为受控盘，不能标记子目录"; return; }
   } else if (isDriveRootPath(currentPath.value)) {
     target = currentPath.value;
   } else {
-    errorMsg.value = "只能在盘符根目录标记备份盘（请返回盘符列表或进入 X:\\ 后再标记）"; return;
+    errorMsg.value = "只能在盘符根目录标记受控盘（请返回盘符列表或进入 X:\\ 后再标记）"; return;
   }
   const ok = window.confirm(
-    `确认将「${target}」标记为 DataVault 备份盘？\n\n将在该盘根目录创建 .datavault 元数据目录。`
+    `确认将「${target}」标记为 DataVault 受控盘？\n\n将在该盘根目录创建 .datavault 元数据目录。`
   );
   if (!ok) { statusMsg.value = "已取消标记"; return; }
-  busy.value = true; statusMsg.value = "正在标记备份盘…";
+  busy.value = true; statusMsg.value = "正在标记受控盘…";
   try {
     await invoke("mark_backup_disk", { drive: target });
-    statusMsg.value = `已标记备份盘：${target}`;
+    statusMsg.value = `已标记受控盘：${target}`;
     await refreshBackupDrives(); currentIsBackup.value = true;
     if (!currentPath.value) await loadDir("");
   } catch (e) { errorMsg.value = String(e); statusMsg.value = ""; }
@@ -347,16 +372,16 @@ async function doIndex() {
   // Non-backup drive letter at 盘符 list: confirm → mark → full-disk index
   if (!drive && selectedRoot) {
     const ok = window.confirm(
-      `「${selectedRoot}」尚未标记为备份盘。\n\n确认标记为 DataVault 备份盘并建立索引？\n将在该盘根目录创建 .datavault 元数据目录，然后扫描建索引。`
+      `「${selectedRoot}」尚未标记为受控。\n\n确认标记为 DataVault 受控盘并建立索引？\n将在该盘根目录创建 .datavault 元数据目录，然后扫描建索引。`
     );
     if (!ok) { statusMsg.value = "已取消"; return; }
     busy.value = true;
     try {
-      statusMsg.value = "正在标记备份盘…";
+      statusMsg.value = "正在标记受控盘…";
       await invoke("mark_backup_disk", { drive: selectedRoot });
       await refreshBackupDrives();
       drive = selectedRoot;
-      statusMsg.value = `已标记备份盘：${selectedRoot}`;
+      statusMsg.value = `已标记受控盘：${selectedRoot}`;
     } catch (e) {
       errorMsg.value = String(e); statusMsg.value = ""; return;
     } finally {
@@ -365,12 +390,12 @@ async function doIndex() {
   }
 
   if (!drive) {
-    errorMsg.value = "请先进入已标记的备份盘，或在盘符列表勾选一个盘符"; return;
+    errorMsg.value = "请先进入已标记的受控盘，或在盘符列表勾选一个盘符"; return;
   }
   try {
     if (pathSelection) {
       if (!currentIsBackup.value && !backupDriveSet.value.has(drive.toUpperCase())) {
-        errorMsg.value = "请先在备份盘目录下勾选要索引的文件或目录"; return;
+        errorMsg.value = "请先在受控盘目录下勾选要索引的文件或目录"; return;
       }
       statusMsg.value = "已启动后台索引（勾选路径，跳过已受控）…";
       const start = await invoke<JobStart>("start_add_controlled_files", {
@@ -379,7 +404,7 @@ async function doIndex() {
       upsertJob({ job_id: start.job_id, kind: start.kind, phase: "scanning", message: "正在收集文件列表…" });
       statusMsg.value = `索引任务 ${start.job_id} 已开始（可与其它任务并行）`;
     } else {
-      statusMsg.value = "正在扫描备份盘并建立索引…";
+      statusMsg.value = "正在扫描受控盘并建立索引…";
       const start = await invoke<JobStart>("start_index_backup_disk", { drive });
       upsertJob({ job_id: start.job_id, kind: start.kind, phase: "scanning", message: "正在扫描…" });
       statusMsg.value = `索引任务 ${start.job_id} 已开始（可与其它任务并行）`;
@@ -391,7 +416,7 @@ async function doIndex() {
 async function doVerifyControlled(mode: "full" | "quick") {
   errorMsg.value = ""; statusMsg.value = "";
   const drive = resolveBackupDrive();
-  if (!drive) { errorMsg.value = "请先进入已标记的备份盘，或在盘符列表勾选一个备份盘"; return; }
+  if (!drive) { errorMsg.value = "请先进入已标记的受控盘，或在盘符列表勾选一个受控盘"; return; }
   try {
     controlledVerify.value = null; verifyReport.value = null; resetVerifyFilters();
     const sel = Array.from(selected.value);
@@ -496,13 +521,17 @@ onMounted(async () => {
   });
   const u6 = await bind("verify-job-finished", (p: VerifyJobFinished) => {
     removeJob(p.job_id);
+const u7 = await bind("dir-counts-update", (p: DirCountUpdate) => {
+    if (p.job_id !== dirCountsJobId.value) return;
+    applyDirCount(p.path, p.controlled_count, p.total_files);
+  });
     statusMsg.value = p.message;
     resetVerifyFilters();
     if (p.controlled) controlledVerify.value = p.controlled;
     if (p.batch) verifyReport.value = p.batch;
     if (!p.ok && !p.cancelled) errorMsg.value = p.message;
   });
-  unlisteners = [u1, u2, u3, u4, u5, u6];
+  unlisteners = [u1, u2, u3, u4, u5, u6, u7];
 });
 onUnmounted(() => { for (const u of unlisteners) u(); unlisteners = []; });
 </script>
@@ -513,7 +542,7 @@ onUnmounted(() => { for (const u of unlisteners) u(); unlisteners = []; });
       <div>
         <h1>数据管理 <span class="sub">DataVault</span></h1>
         <p class="hint">浏览 · 校验 · 备份 · 受控/索引
-          <span v-if="currentIsBackup" class="badge backup">备份盘 {{ currentDrive }}</span>
+          <span v-if="currentIsBackup" class="badge backup">受控盘 {{ currentDrive }}</span>
         </p>
       </div>
     </header>
@@ -548,7 +577,7 @@ onUnmounted(() => { for (const u of unlisteners) u(); unlisteners = []; });
           <button class="btn small" title="清空勾选" @click="clearSelection">清空选择</button>
           <button class="btn small primary-outline" title="将勾选设为备份源" @click="useSelectedAsSources">设为备份源</button>
           <button class="btn small primary-outline" title="将勾选的唯一目录或当前目录设为目标" @click="useCurrentAsDest">设为目标目录</button>
-          <button class="btn small primary-outline" title="仅可标记盘符根为备份盘（需二次确认）" :disabled="busy" @click="doMarkBackupDisk">标记为备份盘</button>
+          <button class="btn small primary-outline" title="仅可标记盘符根为受控（需二次确认）" :disabled="busy" @click="doMarkBackupDisk">标记为受控</button>
           <span class="muted">已选 {{ selected.size }} 项</span>
         </div>
         <div class="pathbar" title="点击复制路径">
@@ -572,8 +601,11 @@ onUnmounted(() => { for (const u of unlisteners) u(); unlisteners = []; });
                 </td>
                 <td>{{ e.is_dir || isDriveRootPath(e.path) ? "文件夹" : "文件" }}</td>
                 <td>{{ e.is_dir || isDriveRootPath(e.path) ? "—" : formatSize(e.size) }}</td>
-                <td><span v-if="e.is_backup_disk" class="badge backup">备份盘</span></td>
-                <td><span v-if="e.is_controlled" class="badge controlled" title="已在 vault.db 登记">受控</span></td>
+                <td><span v-if="e.is_backup_disk" class="badge backup">受控盘</span></td>
+                <td>
+                  <span v-if="e.is_dir && e.is_controlled" class="badge controlled" title="受控文件数/总文件数">{{ e.controlled_count != null && e.total_files != null ? e.controlled_count + '/' + e.total_files : '…' }}</span>
+                  <span v-else-if="e.is_controlled" class="badge controlled" title="已在 vault.db 登记">受控</span>
+                </td>
               </tr>
               <tr v-if="!entries.length"><td colspan="6" class="muted center">空目录或无法访问</td></tr>
             </tbody>
@@ -587,10 +619,10 @@ onUnmounted(() => { for (const u of unlisteners) u(); unlisteners = []; });
             <h2>校验</h2>
             <button type="button" class="btn small primary-outline panel-head-action" title="打开高级校验窗口：批次号/时间/文件数/盘符，可多选校验" @click="openAdvancedVerify">高级校验</button>
           </div>
-          <p class="muted small">直接使用当前勾选的目录/文件（仅其中已受控项）；未勾选则校验全部受控。在盘符列表勾选备份盘符亦可（等同该盘全部受控）。非备份盘符不启用。</p>
+          <p class="muted small">直接使用当前勾选的目录/文件（仅其中已受控项）；未勾选则校验全部受控。在盘符列表勾选受控盘符亦可（等同该盘全部受控）。非受控盘符不启用。</p>
           <div class="row">
-            <button class="btn primary" title="按当前勾选（或全部）快速校验；盘符列表勾选备份盘=该盘全部受控" :disabled="!canVerifyControlled" @click="doVerifyControlled('quick')">快速校验</button>
-            <button class="btn" title="按当前勾选（或全部）完整校验；盘符列表勾选备份盘=该盘全部受控" :disabled="!canVerifyControlled" @click="doVerifyControlled('full')">完整校验</button>
+            <button class="btn primary" title="按当前勾选（或全部）快速校验；盘符列表勾选受控盘=该盘全部受控" :disabled="!canVerifyControlled" @click="doVerifyControlled('quick')">快速校验</button>
+            <button class="btn" title="按当前勾选（或全部）完整校验；盘符列表勾选受控盘=该盘全部受控" :disabled="!canVerifyControlled" @click="doVerifyControlled('full')">完整校验</button>
           </div>
           <label class="field" style="margin-top:10px"><span>备份批次</span>
             <div class="batch-combo" @focusout="onBatchComboBlur">
@@ -610,7 +642,7 @@ onUnmounted(() => { for (const u of unlisteners) u(); unlisteners = []; });
         <section class="panel">
           <div class="panel-head">
             <h2>备份批次</h2>
-            <button type="button" class="btn small primary-outline panel-head-action" title="打开双栏高级备份：左多选源，右单选备份盘/子目录" @click="openAdvancedBackup">高级备份</button>
+            <button type="button" class="btn small primary-outline panel-head-action" title="打开双栏高级备份：左多选源，右单选受控盘/子目录" @click="openAdvancedBackup">高级备份</button>
           </div>
           <p class="muted small">源（{{ sources.length }}）</p>
           <ul class="src-list">
@@ -632,8 +664,8 @@ onUnmounted(() => { for (const u of unlisteners) u(); unlisteners = []; });
           <div class="panel-head">
             <h2>备份索引</h2>
           </div>
-          <p class="muted small" title="勾选文件或目录后，索引所选项，并将所选盘标记为备份盘；已在 vault.db 中的跳过，不重算哈希。">勾选文件/目录后索引所选项，并将所选盘标记为备份盘；已在 vault.db 中的跳过，不重算哈希。</p>
-          <button class="btn primary-outline" title="勾选文件/目录→索引所选并标记该盘为备份盘；已在 vault.db 中的跳过，不重算哈希"
+          <p class="muted small" title="勾选文件或目录后，索引所选项，并将所选盘标记为受控；已在 vault.db 中的跳过，不重算哈希。">勾选文件/目录后索引所选项，并将所选盘标记为受控；已在 vault.db 中的跳过，不重算哈希。</p>
+          <button class="btn primary-outline" title="勾选文件/目录→索引所选并标记该盘为受控；已在 vault.db 中的跳过，不重算哈希"
             :disabled="!canIndex" @click="doIndex">建立备份索引</button>
         </section>
       </aside>

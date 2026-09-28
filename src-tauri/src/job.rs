@@ -240,7 +240,7 @@ pub fn start_add_controlled(
 ) -> Result<JobStart, String> {
     let root = disk::normalize_drive_root(drive)?;
     if !disk::is_backup_disk(&root) {
-        return Err("当前盘不是 DataVault 备份盘，请先标记".into());
+        return Err("当前盘不是 DataVault 受控盘，请先标记".into());
     }
     let (job_id, cancel) = register_job("add");
     let job_id_ret = job_id.clone();
@@ -300,7 +300,7 @@ pub fn start_add_controlled(
 pub fn start_index_disk(app: AppHandle, drive: &str) -> Result<JobStart, String> {
     let root = disk::normalize_drive_root(drive)?;
     if !disk::is_backup_disk(&root) {
-        return Err("当前盘不是 DataVault 备份盘，请先标记".into());
+        return Err("当前盘不是 DataVault 受控盘，请先标记".into());
     }
     let (job_id, cancel) = register_job("index");
     let job_id_ret = job_id.clone();
