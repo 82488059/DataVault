@@ -108,6 +108,22 @@ function toggleSelect(path: string) {
   if (next.has(path)) next.delete(path); else next.add(path);
   selected.value = next;
 }
+function selectAllFiles() {
+  selected.value = new Set(entries.value.map((e) => e.path));
+}
+function clearSelection() {
+  selected.value = new Set();
+}
+function toggleSelectAll() {
+  if (
+    entries.value.length > 0 &&
+    entries.value.every((e) => selected.value.has(e.path))
+  ) {
+    clearSelection();
+  } else {
+    selectAllFiles();
+  }
+}
 async function openEntry(e: DirEntryInfo) { if (e.is_dir) await loadDir(e.path); }
 function useSelectedAsSources() {
   if (selected.value.size === 0) { errorMsg.value = "请先勾选要作为备份源的项"; return; }
@@ -248,12 +264,15 @@ onUnmounted(() => { for (const u of unlisteners) u(); unlisteners = []; });
           <button class="btn small" title="返回盘符列表" :disabled="busy" @click="goRoot">盘符</button>
           <button class="btn small" title="返回上一级" :disabled="busy || !browsePath" @click="goUp">上级</button>
           <button class="btn small" title="刷新目录" :disabled="busy" @click="loadDir(browsePath)">刷新</button>
+          <button class="btn small" title="全选当前列表；若已全选则取消全选" :disabled="busy || !entries.length" @click="toggleSelectAll">全选</button>
+          <button class="btn small" title="清空当前勾选" :disabled="busy || selected.size === 0" @click="clearSelection">清空选择</button>
+          <span class="muted small">已选 {{ selected.size }} 项</span>
           <button class="btn small primary-outline" title="将当前勾选设为备份源" @click="useSelectedAsSources">设为备份源</button>
           <button class="btn small primary-outline" title="将勾选的目录（或当前浏览目录）设为备份目标" @click="useCurrentAsDest">设为目标目录</button>
         </div>
         <div class="table-wrap">
           <table>
-            <thead><tr><th style="width:36px"></th><th>名称</th><th style="width:70px">类型</th><th style="width:70px">受控</th></tr></thead>
+            <thead><tr><th style="width:36px"><input type="checkbox" title="全选 / 取消全选" :checked="entries.length > 0 && entries.every((e) => selected.has(e.path))" @change="toggleSelectAll" /></th><th>名称</th><th style="width:70px">类型</th><th style="width:70px">受控</th></tr></thead>
             <tbody>
               <tr v-for="e in entries" :key="e.path" :class="{ selected: selected.has(e.path) }" @dblclick="openEntry(e)">
                 <td><input type="checkbox" :checked="selected.has(e.path)" @change="toggleSelect(e.path)" /></td>

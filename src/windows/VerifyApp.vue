@@ -173,6 +173,18 @@ async function applyBrowseSelection() {
   await resolveAbsPaths(paths);
 }
 
+async function verifyFromBrowse(mode: "full" | "quick") {
+  // If browse has checkboxes (or a current folder), apply to controlled range first;
+  // otherwise verify whatever is already checked in the controlled list (or all).
+  if (browseSelected.value.size > 0 || browsePath.value) {
+    await applyBrowseSelection();
+    if (selectedControlled.value.size === 0) {
+      // applyBrowseSelection already set status/error for empty match
+      if (pathFilterActive.value) return;
+    }
+  }
+  await doVerifyControlled(mode);
+}
 function clearPathFilter() {
   selectedControlled.value = new Set();
   pathFilterActive.value = false;
@@ -272,9 +284,9 @@ onUnmounted(() => { for (const u of unlisteners) u(); unlisteners = []; });
     <div class="layout">
       <section class="panel">
         <h2>按目录 / 文件选择范围</h2>
-        <p class="muted small">仅显示已受控项；勾选目录或文件后点「应用到校验范围」，未受控的不会进入结果。</p>
+        <p class="muted small">仅显示已受控项；勾选目录/文件后，可在下方操作区直接「快速校验」「完整校验」（会先应用范围），或先「应用到校验范围」。未受控不会进入结果。</p>
         <div class="pathbar"><code>{{ browsePath || "（进入备份盘后浏览）" }}</code></div>
-        <div class="toolbar">
+        <div class="toolbar single-row">
           <button class="btn small" title="回到备份盘根" :disabled="browseBusy || !drive" @click="browseRoot">盘根</button>
           <button class="btn small" title="上一级" :disabled="browseBusy || !browsePath" @click="browseUp">上级</button>
           <button class="btn small" title="刷新" :disabled="browseBusy" @click="loadBrowse(browsePath || drive)">刷新</button>
@@ -294,6 +306,10 @@ onUnmounted(() => { for (const u of unlisteners) u(); unlisteners = []; });
               <tr v-if="!browseEntries.length"><td colspan="4" class="muted center">无已受控项或未进入备份盘</td></tr>
             </tbody>
           </table>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <button class="btn primary" title="将当前勾选目录/文件应用到范围后做快速校验（FastMD5）" :disabled="jobRunning || !isBackupDisk" @click="verifyFromBrowse('quick')">快速校验</button>
+          <button class="btn" title="将当前勾选目录/文件应用到范围后做完整 MD5 校验" :disabled="jobRunning || !isBackupDisk" @click="verifyFromBrowse('full')">完整校验</button>
         </div>
       </section>
       <section class="panel">
@@ -403,6 +419,8 @@ select { background:#0f1419; border:1px solid #2a3442; color:#e7ecf3; border-rad
 .badge.controlled { background:#5b3db8; margin-left:0; }
 .pathbar { margin-bottom:6px; } .pathbar code { display:block; background:#0f1419; padding:6px 8px; border-radius:6px; border:1px solid #2a3442; font-size:0.78rem; word-break:break-all; }
 .toolbar { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:8px; align-items:center; }
+.toolbar.single-row { flex-wrap:nowrap; overflow-x:auto; white-space:nowrap; }
+.toolbar.single-row .btn { flex:0 0 auto; white-space:nowrap; }
 .toolbar.tight { margin-top:8px; }
 .table-wrap { border:1px solid #2a3442; border-radius:8px; max-height:220px; overflow:auto; }
 table { width:100%; border-collapse:collapse; font-size:0.8rem; }
