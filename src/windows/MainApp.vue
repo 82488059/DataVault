@@ -202,8 +202,6 @@ const currentDrive = computed(() => {
   const m = currentPath.value.match(/^([A-Za-z]:)/);
   return m ? m[1].toUpperCase() + "\\" : "";
 });
-const hasJobs = computed(() => activeJobs.value.length > 0);
-
 function kindLabel(kind: string): string {
   switch (kind) {
     case "backup": return "备份";
