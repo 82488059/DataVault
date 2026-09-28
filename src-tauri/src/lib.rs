@@ -1,5 +1,6 @@
 mod disk;
 mod hashutil;
+mod job;
 mod vault;
 
 use md5::{Digest, Md5};
@@ -12,6 +13,7 @@ use tauri::Manager;
 
 use disk::DiskJson;
 use hashutil::{compute_fast_md5, compute_md5_full};
+use job::JobStart;
 use vault::{ControlledFile, ControlledVerifyReport};
 
 const SAMPLE_WINDOW: u64 = 64 * 1024;
@@ -199,11 +201,39 @@ fn mark_backup_disk(drive: String) -> Result<DiskJson, String> {
 
 #[tauri::command]
 fn add_controlled_files(drive: String, paths: Vec<String>) -> Result<Vec<ControlledFile>, String> {
+    // Sync fallback (small sets). Prefer start_add_controlled_files for UI.
     if paths.is_empty() {
         return Err("未选择任何文件".into());
     }
     let root = disk::normalize_drive_root(&drive)?;
     vault::add_controlled_files(&root, &paths)
+}
+
+#[tauri::command]
+fn start_add_controlled_files(
+    app: tauri::AppHandle,
+    drive: String,
+    paths: Vec<String>,
+) -> Result<JobStart, String> {
+    if paths.is_empty() {
+        return Err("未选择任何文件".into());
+    }
+    job::start_add_controlled(app, &drive, &paths)
+}
+
+#[tauri::command]
+fn start_index_backup_disk(app: tauri::AppHandle, drive: String) -> Result<JobStart, String> {
+    job::start_index_disk(app, &drive)
+}
+
+#[tauri::command]
+fn cancel_controlled_job() -> Result<bool, String> {
+    Ok(job::cancel_job())
+}
+
+#[tauri::command]
+fn controlled_job_running() -> Result<bool, String> {
+    Ok(job::is_running())
 }
 
 #[tauri::command]
@@ -261,6 +291,10 @@ fn list_dir(path: String) -> Result<Vec<DirEntryInfo>, String> {
         };
         let ep = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
+        // Hide app metadata directory from explorer UI
+        if name.eq_ignore_ascii_case(disk::META_DIR) {
+            continue;
+        }
         let is_dir = ep.is_dir();
         let size = if is_dir {
             0
@@ -555,6 +589,10 @@ pub fn run() {
             detect_backup_disks,
             mark_backup_disk,
             add_controlled_files,
+            start_add_controlled_files,
+            start_index_backup_disk,
+            cancel_controlled_job,
+            controlled_job_running,
             list_controlled_files,
             verify_controlled_full,
             verify_controlled_quick,

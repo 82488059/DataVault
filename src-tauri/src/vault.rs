@@ -226,7 +226,32 @@ pub fn add_controlled_files(
     Ok(out)
 }
 
-fn collect_files_under(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
+
+/// Expand user-selected paths into concrete files (directories recurse; skip `.datavault`).
+pub fn expand_paths_to_files(drive_root: &Path, paths: &[String]) -> Result<Vec<PathBuf>, String> {
+    let mut out = Vec::new();
+    for p in paths {
+        let abs = PathBuf::from(p);
+        if abs.is_dir() {
+            collect_files_under(&abs, &mut out)?;
+        } else if abs.is_file() {
+            // Reject files under .datavault via normalize
+            let _ = normalize_rel_path(drive_root, &abs)?;
+            out.push(abs);
+        } else {
+            return Err(format!("路径不存在: {}", abs.display()));
+        }
+    }
+    // Deduplicate while preserving order
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|p| {
+        let key = p.to_string_lossy().to_lowercase();
+        seen.insert(key)
+    });
+    Ok(out)
+}
+
+pub fn collect_files_under(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
     let entries = fs::read_dir(dir).map_err(|e| format!("读取目录失败 {}: {e}", dir.display()))?;
     for entry in entries {
         let entry = entry.map_err(|e| format!("目录项错误: {e}"))?;

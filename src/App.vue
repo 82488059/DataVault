@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, onUnmounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 interface DirEntryInfo {
   name: string;
@@ -67,6 +68,33 @@ interface ControlledVerifyItem {
   mtime_changed: boolean;
 }
 
+
+interface JobStart {
+  job_id: string;
+  total: number;
+  kind: string;
+}
+
+interface JobProgress {
+  job_id: string;
+  phase: string;
+  current: number;
+  total: number;
+  rel_path: string | null;
+  message: string;
+}
+
+interface JobFinished {
+  job_id: string;
+  kind: string;
+  ok: boolean;
+  cancelled: boolean;
+  added: number;
+  failed: number;
+  total: number;
+  message: string;
+}
+
 interface ControlledVerifyReport {
   drive_root: string;
   mode: string;
@@ -83,6 +111,9 @@ const selected = ref<Set<string>>(new Set());
 const errorMsg = ref("");
 const statusMsg = ref("");
 const busy = ref(false);
+const jobRunning = ref(false);
+const jobProgress = ref<JobProgress | null>(null);
+let jobUnlisteners: UnlistenFn[] = [];
 
 const destPath = ref("");
 const lastBatch = ref<BackupBatch | null>(null);
@@ -157,7 +188,8 @@ async function loadDir(path: string) {
   errorMsg.value = "";
   busy.value = true;
   try {
-    entries.value = await invoke<DirEntryInfo[]>("list_dir", { path });
+    const raw = await invoke<DirEntryInfo[]>("list_dir", { path });
+    entries.value = raw.filter((e) => e.name.toLowerCase() !== ".datavault");
     currentPath.value = path;
     selected.value = new Set();
     await refreshBackupDrives();
@@ -261,28 +293,65 @@ async function doAddControlled() {
     errorMsg.value = "请勾选要登记的文件或目录";
     return;
   }
-  // Ensure selections are on the same drive
+  if (jobRunning.value) {
+    errorMsg.value = "已有任务在进行中";
+    return;
+  }
   const drive = currentDrive.value.toUpperCase();
   for (const p of selected.value) {
-    if (!p.toUpperCase().startsWith(drive.replace(/\\$/, ""))) {
+    if (!p.toUpperCase().startsWith(drive.replace(/\$/, ""))) {
       errorMsg.value = "受控文件必须位于当前备份盘上";
       return;
     }
   }
-  busy.value = true;
-  statusMsg.value = "正在计算 MD5 / FastMD5 并登记…";
   try {
-    const rows = await invoke<ControlledFile[]>("add_controlled_files", {
+    jobRunning.value = true;
+    jobProgress.value = null;
+    statusMsg.value = "已启动后台登记（计算 MD5 / FastMD5）…";
+    const start = await invoke<JobStart>("start_add_controlled_files", {
       drive: currentDrive.value,
       paths: Array.from(selected.value),
     });
-    statusMsg.value = `已登记受控文件 ${rows.length} 个`;
-    await refreshControlled();
+    statusMsg.value = `后台任务 ${start.job_id} 已开始`;
   } catch (e) {
+    jobRunning.value = false;
     errorMsg.value = String(e);
     statusMsg.value = "";
-  } finally {
-    busy.value = false;
+  }
+}
+
+async function doIndexBackupDisk() {
+  errorMsg.value = "";
+  statusMsg.value = "";
+  if (!currentIsBackup.value || !currentDrive.value) {
+    errorMsg.value = "请先进入已标记的备份盘";
+    return;
+  }
+  if (jobRunning.value) {
+    errorMsg.value = "已有任务在进行中";
+    return;
+  }
+  try {
+    jobRunning.value = true;
+    jobProgress.value = null;
+    statusMsg.value = "正在扫描备份盘并建立索引…";
+    const start = await invoke<JobStart>("start_index_backup_disk", {
+      drive: currentDrive.value,
+    });
+    statusMsg.value = `索引任务 ${start.job_id} 已开始（后台计算哈希）`;
+  } catch (e) {
+    jobRunning.value = false;
+    errorMsg.value = String(e);
+    statusMsg.value = "";
+  }
+}
+
+async function doCancelJob() {
+  try {
+    await invoke<boolean>("cancel_controlled_job");
+    statusMsg.value = "正在取消…";
+  } catch (e) {
+    errorMsg.value = String(e);
   }
 }
 
@@ -376,8 +445,28 @@ async function doVerify(mode: "full" | "quick") {
 }
 
 onMounted(async () => {
+  const u1 = await listen<JobProgress>("controlled-job-progress", (ev) => {
+    jobProgress.value = ev.payload;
+    jobRunning.value = true;
+    statusMsg.value = ev.payload.message;
+  });
+  const u2 = await listen<JobFinished>("controlled-job-finished", async (ev) => {
+    jobRunning.value = false;
+    jobProgress.value = null;
+    statusMsg.value = ev.payload.message;
+    if (!ev.payload.ok && !ev.payload.cancelled) {
+      errorMsg.value = ev.payload.message;
+    }
+    await refreshControlled();
+  });
+  jobUnlisteners = [u1, u2];
   await goRoot();
   await refreshBatches();
+});
+
+onUnmounted(() => {
+  for (const u of jobUnlisteners) u();
+  jobUnlisteners = [];
 });
 </script>
 
@@ -400,6 +489,23 @@ onMounted(async () => {
 
     <div v-if="errorMsg" class="banner error">{{ errorMsg }}</div>
     <div v-if="statusMsg" class="banner ok">{{ statusMsg }}</div>
+    <div v-if="jobRunning && jobProgress" class="banner progress">
+      <div class="progress-meta">
+        <span>{{ jobProgress.phase === "scanning" ? "扫描中" : "哈希中" }}</span>
+        <span v-if="jobProgress.total">{{ jobProgress.current }} / {{ jobProgress.total }}</span>
+      </div>
+      <div class="progress-track">
+        <div
+          class="progress-fill"
+          :style="{
+            width: jobProgress.total
+              ? Math.min(100, (100 * jobProgress.current) / jobProgress.total) + '%'
+              : '15%',
+          }"
+        ></div>
+      </div>
+      <div v-if="jobProgress.rel_path" class="progress-file">{{ jobProgress.rel_path }}</div>
+    </div>
 
     <div class="layout">
       <section class="panel explorer">
@@ -416,10 +522,25 @@ onMounted(async () => {
           </button>
           <button
             class="btn small primary-outline"
-            :disabled="busy || !currentIsBackup"
+            :disabled="busy || jobRunning || !currentIsBackup"
             @click="doAddControlled"
           >
             添加受控文件
+          </button>
+          <button
+            class="btn small primary-outline"
+            :disabled="jobRunning || !currentIsBackup"
+            @click="doIndexBackupDisk"
+            title="扫描当前备份盘上已有文件，计算 MD5/FastMD5 写入 vault.db"
+          >
+            建立备份索引
+          </button>
+          <button
+            v-if="jobRunning"
+            class="btn small"
+            @click="doCancelJob"
+          >
+            取消任务
           </button>
           <span class="muted">已选 {{ selected.size }} 项</span>
         </div>
@@ -624,6 +745,34 @@ h1 {
   background: #3a1515;
   color: #ffb4b4;
   border: 1px solid #7a2e2e;
+}
+.banner.progress {
+  background: #152038;
+  color: #c5d4ff;
+  border: 1px solid #2f5bff;
+}
+.progress-meta {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.85rem;
+  margin-bottom: 6px;
+}
+.progress-track {
+  height: 8px;
+  background: #0f1419;
+  border-radius: 999px;
+  overflow: hidden;
+}
+.progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #2f5bff, #6d9bff);
+  transition: width 0.2s ease;
+}
+.progress-file {
+  margin-top: 6px;
+  font-size: 0.8rem;
+  color: #9aa7b8;
+  word-break: break-all;
 }
 .banner.ok {
   background: #14301f;
