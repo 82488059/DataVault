@@ -278,33 +278,33 @@ async function doBackup() {
   } catch (e) { errorMsg.value = String(e); statusMsg.value = ""; }
 }
 
-async function doAddControlled() {
-  errorMsg.value = ""; statusMsg.value = "";
-  if (!currentIsBackup.value || !currentDrive.value) {
-    errorMsg.value = "请先在备份盘目录下操作（或标记备份盘）"; return;
-  }
-  if (selected.value.size === 0) { errorMsg.value = "请先勾选要登记的文件或目录"; return; }
-  try {
-    statusMsg.value = "已启动后台登记（MD5 / FastMD5）…";
-    const start = await invoke<JobStart>("start_add_controlled_files", {
-      drive: currentDrive.value, paths: Array.from(selected.value),
-    });
-    upsertJob({ job_id: start.job_id, kind: start.kind, phase: "scanning", message: "正在收集文件列表…" });
-    statusMsg.value = `登记任务 ${start.job_id} 已开始（可与其它任务并行）`;
-  } catch (e) { errorMsg.value = String(e); statusMsg.value = ""; }
-}
-
+/** Unified index: selected files/dirs → add those; backup drive letter / no selection on backup disk → full-disk index. */
 async function doIndex() {
   errorMsg.value = ""; statusMsg.value = "";
   const drive = resolveBackupDrive();
   if (!drive) {
     errorMsg.value = "请先进入已标记的备份盘，或在盘符列表勾选一个备份盘"; return;
   }
+  const sel = Array.from(selected.value);
+  const onlyBackupRoot = !currentPath.value && sel.length > 0 && sel.every((p) => isDriveRootPath(p));
+  const pathSelection = sel.length > 0 && !onlyBackupRoot;
   try {
-    statusMsg.value = "正在扫描备份盘并建立索引…";
-    const start = await invoke<JobStart>("start_index_backup_disk", { drive });
-    upsertJob({ job_id: start.job_id, kind: start.kind, phase: "scanning", message: "正在扫描…" });
-    statusMsg.value = `索引任务 ${start.job_id} 已开始（可与其它任务并行）`;
+    if (pathSelection) {
+      if (!currentIsBackup.value) {
+        errorMsg.value = "请先在备份盘目录下勾选要索引的文件或目录"; return;
+      }
+      statusMsg.value = "已启动后台索引（勾选路径，跳过已受控）…";
+      const start = await invoke<JobStart>("start_add_controlled_files", {
+        drive, paths: sel,
+      });
+      upsertJob({ job_id: start.job_id, kind: start.kind, phase: "scanning", message: "正在收集文件列表…" });
+      statusMsg.value = `索引任务 ${start.job_id} 已开始（可与其它任务并行）`;
+    } else {
+      statusMsg.value = "正在扫描备份盘并建立索引…";
+      const start = await invoke<JobStart>("start_index_backup_disk", { drive });
+      upsertJob({ job_id: start.job_id, kind: start.kind, phase: "scanning", message: "正在扫描…" });
+      statusMsg.value = `索引任务 ${start.job_id} 已开始（可与其它任务并行）`;
+    }
   } catch (e) { errorMsg.value = String(e); statusMsg.value = ""; }
 }
 
@@ -542,14 +542,10 @@ onUnmounted(() => { for (const u of unlisteners) u(); unlisteners = []; });
         </section>
 
         <section class="panel">
-          <h2>受控 / 索引</h2>
-          <p class="muted small">添加受控须先勾选文件/目录；建立索引在进入备份盘或勾选备份盘符后即可。已在 vault.db 中的跳过，不重算哈希。可与备份/校验并行。</p>
-          <div class="row">
-            <button class="btn primary-outline" title="将勾选路径登记为受控并计算 MD5/FastMD5（未勾选不可用）"
-              :disabled="!currentIsBackup || !hasSelection" @click="doAddControlled">添加受控文件</button>
-            <button class="btn primary-outline" title="进入备份盘或勾选备份盘符后即可扫描全盘并为未受控文件建索引"
-              :disabled="!canIndex" @click="doIndex">建立备份索引</button>
-          </div>
+          <h2>备份索引</h2>
+          <p class="muted small">勾选文件/目录则仅索引所选；勾选备份盘符或进入备份盘未再勾选则索引全盘。已在 vault.db 中的跳过，不重算哈希。可与备份/校验并行。</p>
+          <button class="btn primary-outline" title="勾选文件/目录→索引所选；勾选备份盘符或未勾选→全盘索引（均跳过已受控）"
+            :disabled="!canIndex" @click="doIndex">建立备份索引</button>
         </section>
       </aside>
     </div>
