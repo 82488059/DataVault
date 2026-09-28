@@ -625,7 +625,7 @@ fn verify_backup_inner(
     progress_job_id: Option<String>,
     cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> Result<VerifyReport, String> {
-    let batch = load_batch(app, batch_id.clone())?;
+    let batch = load_batch(app.clone(), batch_id.clone())?;
     let use_full = mode == "full" || mode == "完整" || mode == "完整校验";
     let mut items = Vec::new();
     let mut passed = 0usize;
