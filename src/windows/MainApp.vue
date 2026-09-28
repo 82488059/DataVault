@@ -520,7 +520,7 @@ onUnmounted(() => { for (const u of unlisteners) u(); unlisteners = []; });
               <tr v-for="e in entries" :key="e.path" :class="{ selected: selected.has(e.path) }" @dblclick="openEntry(e)">
                 <td><input type="checkbox" :checked="selected.has(e.path)" @change="toggleSelect(e.path)" /></td>
                 <td class="name" @click="e.is_dir ? openEntry(e) : toggleSelect(e.path)">
-                  <span class="icon">{{ e.is_dir ? "📁" : "📄" }}</span>{{ e.name }}
+                  <span class="icon" aria-hidden="true">{{ e.is_dir ? "📁" : "📄" }}</span>{{ e.name }}
                 </td>
                 <td>{{ e.is_dir ? "文件夹" : "文件" }}</td>
                 <td>{{ e.is_dir ? "—" : formatSize(e.size) }}</td>
@@ -632,8 +632,13 @@ h1 { margin:0; font-size:1.35rem; font-weight:700; }
 .progress-fill { height:100%; background:linear-gradient(90deg,#2f5bff,#6d9bff); }
 .progress-file { margin-top:6px; font-size:0.78rem; color:#9aa7b8; word-break:break-all; }
 .layout { display:grid; grid-template-columns:1fr 320px; gap:12px; min-height:0; flex:1; align-items:stretch; }
-.side { display:flex; flex-direction:column; gap:10px; min-height:0; height:100%; overflow:auto; }
+.side { display:flex; flex-direction:column; gap:8px; min-height:0; height:100%; overflow:hidden; }
 .panel { background:#171d25; border:1px solid #2a3442; border-radius:12px; padding:12px; }
+.side > .panel { flex:0 1 auto; min-height:0; overflow:hidden; padding:10px; }
+.side h2 { margin:0 0 6px; font-size:0.9rem; }
+.side .muted.small { margin:0 0 6px; line-height:1.35; }
+.side .field { margin-bottom:8px; }
+.side .row { gap:6px; }
 /* Left browser stretches to match right column (校验+备份+索引) total height; list scrolls inside. */
 .explorer { display:flex; flex-direction:column; min-height:0; height:100%; max-height:none; overflow:hidden; }
 .explorer .table-wrap { flex:1; min-height:0; overflow:auto; }
@@ -667,7 +672,8 @@ input[type="text"], select { background:#0f1419; border:1px solid #2a3442; color
 .badge { font-size:0.72rem; background:#2f5bff; padding:2px 8px; border-radius:999px; margin-left:6px; }
 .badge.backup { background:#1f6b45; }
 .badge.controlled { background:#5b3db8; margin-left:0; }
-.src-list { list-style:none; padding:0; margin:0 0 8px; max-height:90px; overflow:auto; font-size:0.78rem; }
+.src-list { list-style:none; padding:0; margin:0 0 6px; max-height:64px; overflow:auto; font-size:0.78rem; scrollbar-width:none; }
+.src-list::-webkit-scrollbar { width:0; height:0; display:none; }
 .src-list li { display:flex; justify-content:space-between; gap:6px; padding:4px 0; border-bottom:1px solid #243041; word-break:break-all; }
 .results-panel { flex-shrink:0; max-height:min(240px, 28vh); overflow:auto; border-color:#3a4a63; }
 .results-panel h2 { color:#9db4ff; }
@@ -678,7 +684,7 @@ input[type="text"], select { background:#0f1419; border:1px solid #2a3442; color
 .result-list li.bad { border-color:#7a2e2e; background:#201212; }
 .rel { font-weight:600; } .hash { font-family:ui-monospace,Consolas,monospace; color:#9aa7b8; word-break:break-all; }
 .verify-summary { margin-top:8px; }
-@media (max-width:1000px) { .layout { grid-template-columns:1fr; } .explorer { height:auto; max-height:50vh; } .side { height:auto; } }
+@media (max-width:1000px) { .layout { grid-template-columns:1fr; } .explorer { height:auto; max-height:50vh; } .side { height:auto; overflow:hidden; } }
 .progress-row { display:flex; align-items:center; gap:12px; }
 .progress-main { flex:1; min-width:0; }
 </style>

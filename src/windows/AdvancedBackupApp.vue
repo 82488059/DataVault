@@ -231,15 +231,24 @@ onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } })
         <code class="path">{{ srcPath || "此电脑（盘符）" }}</code>
         <div class="table-wrap">
           <table>
-            <thead><tr><th style="width:36px"></th><th>名称</th><th style="width:70px">类型</th><th style="width:90px">大小</th></tr></thead>
+            <thead>
+              <tr>
+                <th style="width:36px"></th><th>名称</th><th style="width:70px">类型</th>
+                <th style="width:90px">大小</th><th style="width:80px">标记</th><th style="width:60px">受控</th>
+              </tr>
+            </thead>
             <tbody>
               <tr v-for="e in srcEntries" :key="'s-'+e.path" :class="{ selected: srcSelected.has(e.path) }" @dblclick="openSrc(e)">
                 <td @click.stop><input type="checkbox" :checked="srcSelected.has(e.path)" @change="toggleSrc(e.path)" /></td>
-                <td @click="toggleSrc(e.path)">{{ e.name || e.path }}
-                  <span v-if="e.is_backup_disk" class="badge">备份盘</span></td>
+                <td class="name" @click="(e.is_dir || e.is_backup_disk || isDriveRoot(e.path)) ? openSrc(e) : toggleSrc(e.path)">
+                  <span class="icon" aria-hidden="true">{{ (e.is_dir || e.is_backup_disk || isDriveRoot(e.path)) ? "📁" : "📄" }}</span>{{ e.name || e.path }}
+                </td>
                 <td>{{ e.is_dir || e.is_backup_disk ? "文件夹" : "文件" }}</td>
                 <td>{{ e.is_dir || e.is_backup_disk ? "—" : formatSize(e.size) }}</td>
+                <td><span v-if="e.is_backup_disk" class="badge backup">备份盘</span></td>
+                <td><span v-if="e.is_controlled" class="badge controlled" title="已在 vault.db 登记">受控</span></td>
               </tr>
+              <tr v-if="!srcEntries.length"><td colspan="6" class="muted center">空目录或无法访问</td></tr>
             </tbody>
           </table>
         </div>
@@ -255,20 +264,27 @@ onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } })
         <code class="path">{{ dstPath || "备份盘列表" }}</code>
         <div class="table-wrap">
           <table>
-            <thead><tr><th style="width:36px"></th><th>名称</th><th style="width:70px">类型</th></tr></thead>
+            <thead>
+              <tr>
+                <th style="width:36px"></th><th>名称</th><th style="width:70px">类型</th>
+                <th style="width:80px">标记</th>
+              </tr>
+            </thead>
             <tbody>
               <tr v-for="e in dstEntries" :key="'d-'+e.path"
                 :class="{ selected: dstSelected.replace(/[\\/]+$/, '').toUpperCase() === e.path.replace(/[\\/]+$/, '').toUpperCase() }"
-                @click="pickDst(e)" @dblclick="openDst(e)">
+                @dblclick="openDst(e)">
                 <td @click.stop>
                   <input type="radio" name="dst" :checked="dstSelected.replace(/[\\/]+$/, '').toUpperCase() === e.path.replace(/[\\/]+$/, '').toUpperCase()" @change="pickDst(e)" />
                 </td>
-                <td>{{ e.name || e.path }}
-                  <span v-if="e.is_backup_disk" class="badge">备份盘</span></td>
+                <td class="name" @click="openDst(e)">
+                  <span class="icon" aria-hidden="true">📁</span>{{ e.name || e.path }}
+                </td>
                 <td>文件夹</td>
+                <td><span v-if="e.is_backup_disk" class="badge backup">备份盘</span></td>
               </tr>
               <tr v-if="!dstEntries.length">
-                <td colspan="3" class="muted center">无可用备份盘。请先在主窗口「标记为备份盘」。</td>
+                <td colspan="4" class="muted center">无可用备份盘。请先在主窗口「标记为备份盘」。</td>
               </tr>
             </tbody>
           </table>
@@ -301,15 +317,18 @@ h2 { margin:0 0 8px; font-size:0.95rem; color:#9db4ff; }
 .toolbar { display:flex; gap:8px; align-items:center; margin-bottom:6px; flex-wrap:wrap; }
 .path { display:block; background:#0f1419; padding:6px 8px; border-radius:6px; border:1px solid #2a3442; font-size:0.8rem; margin-bottom:8px; word-break:break-all; }
 .table-wrap { flex:1; overflow:auto; border:1px solid #2a3442; border-radius:8px; min-height:180px; }
-table { width:100%; border-collapse:collapse; font-size:0.85rem; }
-th, td { padding:6px 8px; text-align:left; border-bottom:1px solid #243041; }
+table { width:100%; border-collapse:collapse; font-size:0.88rem; }
+th, td { padding:7px 9px; text-align:left; border-bottom:1px solid #243041; }
 th { background:#1c2430; color:#9aa7b8; font-weight:600; position:sticky; top:0; }
 tr.selected { background:#1e2a40; } tr:hover { background:#1a222e; }
+.name { cursor:pointer; user-select:none; } .icon { margin-right:6px; }
 .btn { background:#243044; color:#e7ecf3; border:1px solid #3a4a63; border-radius:8px; padding:8px 12px; cursor:pointer; font-size:0.85rem; }
 .btn:disabled { opacity:0.45; cursor:not-allowed; }
 .btn.primary { background:#2f5bff; border-color:#2f5bff; font-weight:600; }
 .btn.small { padding:4px 8px; font-size:0.78rem; }
 .muted { color:#9aa7b8; font-size:0.8rem; } .small { font-size:0.78rem; } .center { text-align:center; }
-.badge { font-size:0.7rem; background:#1f6b45; padding:1px 6px; border-radius:999px; margin-left:6px; }
+.badge { font-size:0.72rem; background:#2f5bff; padding:2px 8px; border-radius:999px; margin-left:6px; }
+.badge.backup { background:#1f6b45; margin-left:0; }
+.badge.controlled { background:#5b3db8; margin-left:0; }
 @media (max-width:900px) { .panes { grid-template-columns:1fr; } }
 </style>
