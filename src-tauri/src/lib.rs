@@ -8,8 +8,9 @@ use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 use disk::DiskJson;
 use hashutil::{compute_fast_md5, compute_md5_full};
@@ -580,6 +581,334 @@ fn verify_backup(
     })
 }
 
+
+static BACKUP_RUNNING: AtomicBool = AtomicBool::new(false);
+static BACKUP_CANCEL: AtomicBool = AtomicBool::new(false);
+static VERIFY_RUNNING: AtomicBool = AtomicBool::new(false);
+static VERIFY_CANCEL: AtomicBool = AtomicBool::new(false);
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BackupJobFinished {
+    pub job_id: String,
+    pub ok: bool,
+    pub cancelled: bool,
+    pub copied: usize,
+    pub failed: usize,
+    pub total: usize,
+    pub message: String,
+    pub batch: Option<BackupBatch>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct VerifyJobFinished {
+    pub job_id: String,
+    pub kind: String,
+    pub ok: bool,
+    pub cancelled: bool,
+    pub message: String,
+    pub controlled: Option<ControlledVerifyReport>,
+    pub batch: Option<VerifyReport>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GenericProgress {
+    pub job_id: String,
+    pub phase: String,
+    pub current: usize,
+    pub total: usize,
+    pub rel_path: Option<String>,
+    pub message: String,
+}
+
+#[tauri::command]
+fn cancel_backup_job() -> Result<bool, String> {
+    if BACKUP_RUNNING.load(Ordering::SeqCst) {
+        BACKUP_CANCEL.store(true, Ordering::SeqCst);
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+#[tauri::command]
+fn cancel_verify_job() -> Result<bool, String> {
+    if VERIFY_RUNNING.load(Ordering::SeqCst) {
+        VERIFY_CANCEL.store(true, Ordering::SeqCst);
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+#[tauri::command]
+fn start_backup(
+    app: tauri::AppHandle,
+    sources: Vec<String>,
+    dest: String,
+) -> Result<JobStart, String> {
+    if sources.is_empty() {
+        return Err("未选择任何源路径".into());
+    }
+    if dest.trim().is_empty() {
+        return Err("目标目录为空".into());
+    }
+    if BACKUP_RUNNING
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err("已有备份任务在进行中".into());
+    }
+    BACKUP_CANCEL.store(false, Ordering::SeqCst);
+    let job_id = format!(
+        "backup-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
+    let job_id_ret = job_id.clone();
+    std::thread::Builder::new()
+        .name("datavault-backup".into())
+        .spawn(move || {
+            let _ = app.emit(
+                "backup-job-progress",
+                GenericProgress {
+                    job_id: job_id.clone(),
+                    phase: "copying".into(),
+                    current: 0,
+                    total: 0,
+                    rel_path: None,
+                    message: "开始备份…".into(),
+                },
+            );
+            // Reuse sync backup; UI stays responsive because this is a background thread.
+            let result = backup_paths(app.clone(), sources, dest);
+            match result {
+                Ok(batch) => {
+                    let copied = batch.files.iter().filter(|f| f.error.is_none()).count();
+                    let failed = batch.files.iter().filter(|f| f.error.is_some()).count();
+                    let total = batch.files.len();
+                    let _ = app.emit(
+                        "backup-job-finished",
+                        BackupJobFinished {
+                            job_id: job_id.clone(),
+                            ok: failed == 0,
+                            cancelled: false,
+                            copied,
+                            failed,
+                            total,
+                            message: format!("备份完成：成功 {copied}，失败 {failed}，共 {total}"),
+                            batch: Some(batch),
+                        },
+                    );
+                }
+                Err(e) => {
+                    let _ = app.emit(
+                        "backup-job-finished",
+                        BackupJobFinished {
+                            job_id: job_id.clone(),
+                            ok: false,
+                            cancelled: BACKUP_CANCEL.load(Ordering::SeqCst),
+                            copied: 0,
+                            failed: 0,
+                            total: 0,
+                            message: e,
+                            batch: None,
+                        },
+                    );
+                }
+            }
+            BACKUP_RUNNING.store(false, Ordering::SeqCst);
+            BACKUP_CANCEL.store(false, Ordering::SeqCst);
+        })
+        .map_err(|e| {
+            BACKUP_RUNNING.store(false, Ordering::SeqCst);
+            format!("无法启动备份任务: {e}")
+        })?;
+    Ok(JobStart {
+        job_id: job_id_ret,
+        total: 0,
+        kind: "backup".into(),
+    })
+}
+
+#[tauri::command]
+fn start_verify_controlled(
+    app: tauri::AppHandle,
+    drive: String,
+    mode: String,
+    rel_paths: Option<Vec<String>>,
+) -> Result<JobStart, String> {
+    if VERIFY_RUNNING
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err("已有校验任务在进行中".into());
+    }
+    VERIFY_CANCEL.store(false, Ordering::SeqCst);
+    let job_id = format!(
+        "verify-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
+    let job_id_ret = job_id.clone();
+    let kind = if mode == "full" { "controlled-full" } else { "controlled-quick" };
+    let kind_s = kind.to_string();
+    std::thread::Builder::new()
+        .name("datavault-verify".into())
+        .spawn(move || {
+            let _ = app.emit(
+                "verify-job-progress",
+                GenericProgress {
+                    job_id: job_id.clone(),
+                    phase: "verifying".into(),
+                    current: 0,
+                    total: 0,
+                    rel_path: None,
+                    message: "正在校验受控文件…".into(),
+                },
+            );
+            let result = if mode == "full" {
+                verify_controlled_full(drive, rel_paths)
+            } else {
+                verify_controlled_quick(drive, rel_paths)
+            };
+            match result {
+                Ok(report) => {
+                    let msg = format!(
+                        "受控校验完成：通过 {}，失败 {}，缺失 {}，错误 {}",
+                        report.passed, report.failed, report.missing, report.errors
+                    );
+                    let ok = report.failed == 0 && report.missing == 0 && report.errors == 0;
+                    let _ = app.emit(
+                        "verify-job-finished",
+                        VerifyJobFinished {
+                            job_id,
+                            kind: kind_s,
+                            ok,
+                            cancelled: false,
+                            message: msg,
+                            controlled: Some(report),
+                            batch: None,
+                        },
+                    );
+                }
+                Err(e) => {
+                    let _ = app.emit(
+                        "verify-job-finished",
+                        VerifyJobFinished {
+                            job_id,
+                            kind: kind_s,
+                            ok: false,
+                            cancelled: VERIFY_CANCEL.load(Ordering::SeqCst),
+                            message: e,
+                            controlled: None,
+                            batch: None,
+                        },
+                    );
+                }
+            }
+            VERIFY_RUNNING.store(false, Ordering::SeqCst);
+            VERIFY_CANCEL.store(false, Ordering::SeqCst);
+        })
+        .map_err(|e| {
+            VERIFY_RUNNING.store(false, Ordering::SeqCst);
+            format!("无法启动校验任务: {e}")
+        })?;
+    Ok(JobStart {
+        job_id: job_id_ret,
+        total: 0,
+        kind: kind.to_string(),
+    })
+}
+
+#[tauri::command]
+fn start_verify_backup(
+    app: tauri::AppHandle,
+    batch_id: String,
+    mode: String,
+) -> Result<JobStart, String> {
+    if VERIFY_RUNNING
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err("已有校验任务在进行中".into());
+    }
+    VERIFY_CANCEL.store(false, Ordering::SeqCst);
+    let job_id = format!(
+        "verify-batch-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
+    let job_id_ret = job_id.clone();
+    std::thread::Builder::new()
+        .name("datavault-verify-batch".into())
+        .spawn(move || {
+            let _ = app.emit(
+                "verify-job-progress",
+                GenericProgress {
+                    job_id: job_id.clone(),
+                    phase: "verifying".into(),
+                    current: 0,
+                    total: 0,
+                    rel_path: None,
+                    message: "正在校验备份批次…".into(),
+                },
+            );
+            match verify_backup(app.clone(), batch_id, mode) {
+                Ok(report) => {
+                    let msg = format!(
+                        "批次校验完成：通过 {}，失败 {}",
+                        report.passed, report.failed
+                    );
+                    let ok = report.failed == 0;
+                    let _ = app.emit(
+                        "verify-job-finished",
+                        VerifyJobFinished {
+                            job_id,
+                            kind: "batch".into(),
+                            ok,
+                            cancelled: false,
+                            message: msg,
+                            controlled: None,
+                            batch: Some(report),
+                        },
+                    );
+                }
+                Err(e) => {
+                    let _ = app.emit(
+                        "verify-job-finished",
+                        VerifyJobFinished {
+                            job_id,
+                            kind: "batch".into(),
+                            ok: false,
+                            cancelled: VERIFY_CANCEL.load(Ordering::SeqCst),
+                            message: e,
+                            controlled: None,
+                            batch: None,
+                        },
+                    );
+                }
+            }
+            VERIFY_RUNNING.store(false, Ordering::SeqCst);
+            VERIFY_CANCEL.store(false, Ordering::SeqCst);
+        })
+        .map_err(|e| {
+            VERIFY_RUNNING.store(false, Ordering::SeqCst);
+            format!("无法启动批次校验: {e}")
+        })?;
+    Ok(JobStart {
+        job_id: job_id_ret,
+        total: 0,
+        kind: "batch".into(),
+    })
+}
+
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -601,9 +930,14 @@ pub fn run() {
             md5_quick,
             md5_fast,
             backup_paths,
+            start_backup,
+            cancel_backup_job,
             load_batch,
             list_batches,
-            verify_backup
+            verify_backup,
+            start_verify_controlled,
+            start_verify_backup,
+            cancel_verify_job
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
