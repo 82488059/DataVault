@@ -226,3 +226,5 @@ return hex(ctx.digest())
 5. **校验四态对齐**：受控与**批次**校验均使用 `pass` / `fail` / `missing` / `error`，汇总 `passed` / `failed` / `missing` / `errors`；UI 可点击筛选。
 6. **高级窗口**：高级校验（目录+批次）、高级备份（双栏）；不改变盘上 `disk.json` / `vault.db` 布局。
 7. **FastMD5**：仍以本节 100MB×10% 为准；README 中旧「头/尾 64KB」描述已废弃，仅作历史对照。
+8. **高级备份与归档**：源文件名正则（匹配/排除；支持 JS `/pattern/flags`）；可选打包 `{批次ID}.tar` 并在受控盘自动 upsert 归档行；浏览可展开已受控 `.tar`。不改变 `disk.json` / `controlled_files` 列结构。
+9. **UI 细节**：高级备份左右等宽；列表名称换行。

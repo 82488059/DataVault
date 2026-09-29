@@ -1,4 +1,4 @@
-﻿# DataVault（数据管理）
+# DataVault（数据管理）
 
 基于 **Tauri 2 + Vue 3 + TypeScript** 的桌面端数据备份与校验工具。
 
@@ -6,15 +6,13 @@
 
 ## 功能概览
 
-- 高级备份支持**文件名正则过滤**与可选**打包为 tar**（受控盘自动登记归档）；浏览器可展开受控 `.tar`。
-
-- 资源管理器式浏览本机盘符 / 文件夹 / 文件（列：**名称 / 大小 / 受控 / 数量**）
-- **标记为受控**（盘符根 `.datavault`）；**建立备份索引**登记受控文件
+- 资源管理器式浏览本机盘符 / 文件夹 / 文件（列：**名称 / 大小 / 受控 / 数量**）；长文件名自动换行
+- **标记为受控**（盘符根 `.datavault`）；**建立备份索引**（单一按钮，合并原「添加受控」）登记受控文件
 - 批次备份到目标目录，并写入批次元数据（可选批次名称）
-- **完整校验**：整文件 MD5
-- **快速校验**：FastMD5（默认每 100MB 块取前 10%）
+- **完整校验**：整文件 MD5；**快速校验**：FastMD5（默认每 100MB 块取前 10%）
 - 主窗**多任务状态面板**；校验结果四态：通过 / 失败 / 缺失 / 错误
 - 独立窗：**高级校验**、**高级备份**
+  - 高级备份：左右等宽双栏；源文件名正则（匹配/排除；支持裸 Rust 正则或 JS 风格 `/pattern/flags`）；可选**打包为 tar**（受控盘自动登记归档）；可展开受控 `.tar`
 
 更多说明见 [`docs/概览.md`](docs/概览.md)。
 
@@ -39,13 +37,14 @@ npm run tauri dev
 cmd /c `"D:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && set PATH=%USERPROFILE%\.cargo\bin;%PATH% && npm run tauri build
 ```
 
-若 WiX/安装包失败，回退：
+### 打包回退顺序
 
-```powershell
-npm run tauri build -- --no-bundle
-```
+1. 优先 `npm run tauri build`（`bundle.targets=all`：可用时产出 MSI / NSIS 等）
+2. WiX/MSI 不可用时：`npm run tauri build -- --bundles nsis`
+3. 再回退便携包：`npm run tauri build -- --bundles zip`
+4. 仍失败则：`npm run tauri build -- --no-bundle`，交付 `src-tauri\target\release\datavault.exe`
 
-产物通常位于 `src-tauri\target\release\datavault.exe`；成功打包时另有 `bundle\msi` 或 `bundle\nsis`。
+成功打包时产物通常在 `src-tauri\target\release\bundle\`（`msi` / `nsis` / `zip`）。
 
 ## MD5 方案说明
 
