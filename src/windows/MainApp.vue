@@ -844,11 +844,11 @@ h1 { margin:0; font-size:1.35rem; font-weight:700; }
 .pathbar code.path-copy:hover { border-color:#2f5bff; }
 .toolbar { display:flex; gap:8px; align-items:center; margin-bottom:8px; flex-wrap:wrap; }
 .table-wrap { flex:1; overflow:auto; border:1px solid #2a3442; border-radius:8px; min-height:180px; }
-table { width:100%; border-collapse:collapse; font-size:0.88rem; }
+table { width:100%; border-collapse:collapse; font-size:0.88rem; table-layout:fixed; }
 th, td { padding:7px 9px; text-align:left; border-bottom:1px solid #243041; }
 th { background:#1c2430; color:#9aa7b8; font-weight:600; position:sticky; top:0; }
 tr.selected { background:#1e2a40; } tr:hover { background:#1a222e; }
-.name { cursor:pointer; user-select:none; } .icon { margin-right:6px; }
+.name { cursor:pointer; user-select:none; word-break:break-all; overflow-wrap:anywhere; white-space:normal; } .icon { margin-right:6px; }
 h2 { margin:0 0 8px; font-size:0.95rem; }
 .field { display:flex; flex-direction:column; gap:4px; margin-bottom:10px; font-size:0.8rem; color:#9aa7b8; }
 input[type="text"], select { background:#0f1419; border:1px solid #2a3442; color:#e7ecf3; border-radius:8px; padding:8px 10px; }
