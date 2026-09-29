@@ -38,6 +38,14 @@ const progress = ref<JobProgress | null>(null);
 const lastBatch = ref<BackupBatch | null>(null);
 const busy = ref(false);
 const batchName = ref("");
+const nameRegex = ref("");
+/** include = 仅匹配；exclude = 排除匹配 */
+const regexMode = ref<"include" | "exclude">("include");
+const packAsTar = ref(false);
+/** When browsing inside a controlled .tar */
+const tarBrowse = ref<{ tarPath: string; prefix: string } | null>(null);
+const tarBrowseDst = ref<{ tarPath: string; prefix: string } | null>(null);
+
 const unlisteners: UnlistenFn[] = [];
 const dirCountsJobId = ref(0);
 
@@ -97,6 +105,55 @@ async function requestDirFileCounts(list: DirEntry[]) {
   try { dirCountsJobId.value = await invoke<number>("start_dir_file_counts", { paths }); } catch { /* ignore */ }
 }
 
+
+function isControlledTar(e: DirEntry): boolean {
+  return !e.is_dir && !!e.is_controlled && e.name.toLowerCase().endsWith(".tar");
+}
+function isOpenable(e: DirEntry): boolean {
+  return isFolderEntry(e) || isControlledTar(e);
+}
+
+async function loadTarViewDst() {
+  if (!tarBrowseDst.value) return;
+  const { tarPath, prefix } = tarBrowseDst.value;
+  const raw = await invoke<{ name: string; tar_path: string; rel_path: string; is_dir: boolean; size: number }[]>(
+    "list_tar_entries",
+    { path: tarPath, prefix: prefix || null },
+  );
+  dstEntries.value = raw.map((t) => ({
+    name: t.name,
+    path: `${t.tar_path}::${t.rel_path}`,
+    is_dir: t.is_dir,
+    size: t.size,
+    is_backup_disk: false,
+    is_controlled: true,
+    controlled_count: null,
+    total_files: null,
+  }));
+  dstPath.value = prefix ? `${tarPath} :: ${prefix}` : `${tarPath} :: /`;
+}
+
+async function loadTarView() {
+  if (!tarBrowse.value) return;
+  const { tarPath, prefix } = tarBrowse.value;
+  const raw = await invoke<{ name: string; tar_path: string; rel_path: string; is_dir: boolean; size: number }[]>(
+    "list_tar_entries",
+    { path: tarPath, prefix: prefix || null },
+  );
+  srcEntries.value = raw.map((t) => ({
+    name: t.name,
+    path: `${t.tar_path}::${t.rel_path}`,
+    is_dir: t.is_dir,
+    size: t.size,
+    is_backup_disk: false,
+    is_controlled: true,
+    controlled_count: null,
+    total_files: null,
+  }));
+  srcPath.value = prefix ? `${tarPath} :: ${prefix}` : `${tarPath} :: /`;
+  srcSelected.value = new Set();
+}
+
 const sameDriveConflict = computed(() => {
   if (!dstSelected.value || srcSelected.value.size === 0) return false;
   const dd = normDrive(dstSelected.value);
@@ -112,6 +169,7 @@ const canBackup = computed(
 
 async function loadSrc(path: string) {
   errorMsg.value = "";
+  tarBrowse.value = null;
   try {
     if (!path) {
       srcEntries.value = await invoke<DirEntry[]>("list_dir", { path: "" });
@@ -127,6 +185,7 @@ async function loadSrc(path: string) {
 
 async function loadDst(path: string) {
   errorMsg.value = "";
+  tarBrowseDst.value = null;
   try {
     if (!path) {
       dstEntries.value = await invoke<DirEntry[]>("list_dir", { path: "" });
@@ -152,13 +211,50 @@ async function loadDst(path: string) {
 }
 
 function openSrc(e: DirEntry) {
+  if (tarBrowse.value && e.is_dir) {
+    const rel = e.path.includes("::") ? e.path.split("::").slice(1).join("::") : e.path;
+    tarBrowse.value = { tarPath: tarBrowse.value.tarPath, prefix: rel.replace(/\/+$/, "") };
+    void loadTarView().catch((err) => { errorMsg.value = String(err); });
+    return;
+  }
+  if (isControlledTar(e)) {
+    tarBrowse.value = { tarPath: e.path, prefix: "" };
+    void loadTarView().catch((err) => { errorMsg.value = String(err); });
+    return;
+  }
   if (isFolderEntry(e)) void loadSrc(e.path);
 }
 function openDst(e: DirEntry) {
+  if (tarBrowseDst.value && e.is_dir) {
+    const rel = e.path.includes("::") ? e.path.split("::").slice(1).join("::") : e.path;
+    tarBrowseDst.value = { tarPath: tarBrowseDst.value.tarPath, prefix: rel.replace(/\/+$/, "") };
+    void loadTarViewDst().catch((err) => { errorMsg.value = String(err); });
+    return;
+  }
+  if (isControlledTar(e)) {
+    tarBrowseDst.value = { tarPath: e.path, prefix: "" };
+    void loadTarViewDst().catch((err) => { errorMsg.value = String(err); });
+    return;
+  }
   if (isFolderEntry(e)) void loadDst(e.path);
 }
 
 function srcUp() {
+  if (tarBrowse.value) {
+    const pref = tarBrowse.value.prefix.replace(/\/+$/, "");
+    if (!pref) {
+      const tarPath = tarBrowse.value.tarPath;
+      const parent = tarPath.replace(/[\\/]+$/, "");
+      const i = Math.max(parent.lastIndexOf("\\"), parent.lastIndexOf("/"));
+      tarBrowse.value = null;
+      void loadSrc(i > 0 ? parent.slice(0, i + 1) : "");
+      return;
+    }
+    const i = pref.lastIndexOf("/");
+    tarBrowse.value = { tarPath: tarBrowse.value.tarPath, prefix: i >= 0 ? pref.slice(0, i) : "" };
+    void loadTarView().catch((err) => { errorMsg.value = String(err); });
+    return;
+  }
   if (!srcPath.value) return;
   if (isDriveRoot(srcPath.value)) void loadSrc("");
   else {
@@ -168,6 +264,21 @@ function srcUp() {
   }
 }
 function dstUp() {
+  if (tarBrowseDst.value) {
+    const pref = tarBrowseDst.value.prefix.replace(/\/+$/, "");
+    if (!pref) {
+      const tarPath = tarBrowseDst.value.tarPath;
+      const parent = tarPath.replace(/[\\/]+$/, "");
+      const i = Math.max(parent.lastIndexOf("\\"), parent.lastIndexOf("/"));
+      tarBrowseDst.value = null;
+      void loadDst(i > 0 ? parent.slice(0, i + 1) : "");
+      return;
+    }
+    const i = pref.lastIndexOf("/");
+    tarBrowseDst.value = { tarPath: tarBrowseDst.value.tarPath, prefix: i >= 0 ? pref.slice(0, i) : "" };
+    void loadTarViewDst().catch((err) => { errorMsg.value = String(err); });
+    return;
+  }
   if (!dstPath.value) return;
   if (isDriveRoot(dstPath.value)) void loadDst("");
   else {
@@ -228,7 +339,14 @@ async function doBackup() {
   busy.value = true;
   try {
     statusMsg.value = "正在启动备份…";
-    const start = await invoke<JobStart>("start_backup", { sources, dest, batchName: batchName.value.trim() || null });
+    const start = await invoke<JobStart>("start_backup", {
+      sources,
+      dest,
+      batchName: batchName.value.trim() || null,
+      nameRegex: nameRegex.value.trim() || null,
+      regexExclude: regexMode.value === "exclude",
+      packAsTar: packAsTar.value,
+    });
     statusMsg.value = `备份任务 ${start.job_id} 已开始`;
   } catch (e) {
     errorMsg.value = String(e); statusMsg.value = "";
@@ -281,9 +399,24 @@ onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } })
       <div v-if="progress.rel_path || progress.message" class="progress-file">{{ progress.rel_path || progress.message }}</div>
     </div>
 
-    <label class="field batch-name"><span>批次名称（可选，默认年月日时分秒）</span>
+        <label class="field batch-name"><span>批次名称（可选；默认本地时间戳）</span>
       <input v-model="batchName" type="text" placeholder="例如 项目A-全量" title="留空则使用本地时间 YYYYMMDDHHmmss 作为批次号" />
     </label>
+    <div class="adv-opts">
+      <label class="field regex-field"><span>源文件名正则（可选；匹配文件名非路径）</span>
+        <div class="regex-row">
+          <input v-model="nameRegex" type="text" placeholder="例如 \.pdf$ 或 ^report" title="Rust/JS 风格正则，作用于文件名" />
+          <select v-model="regexMode" title="匹配=仅备份匹配项；排除=跳过匹配项">
+            <option value="include">匹配</option>
+            <option value="exclude">排除</option>
+          </select>
+        </div>
+      </label>
+      <label class="pack-tar" title="将选中文件打成单个 .tar；目标为受控盘时自动登记受控元数据">
+        <input type="checkbox" v-model="packAsTar" />
+        <span>打包为 tar</span>
+      </label>
+    </div>
     <div class="panes">
       <section class="panel pane">
         <h2>源（多选）</h2>
@@ -306,8 +439,8 @@ onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } })
             <tbody>
               <tr v-for="e in srcEntries" :key="'s-'+e.path" :class="{ selected: srcSelected.has(e.path) }" @dblclick="openSrc(e)">
                 <td @click.stop><input type="checkbox" :checked="srcSelected.has(e.path)" @change="toggleSrc(e.path)" /></td>
-                <td class="name" @click="isFolderEntry(e) ? openSrc(e) : toggleSrc(e.path)">
-                  <span class="icon" aria-hidden="true">{{ isFolderEntry(e) ? "📁" : "📄" }}</span>{{ e.name || e.path }}
+                <td class="name" @click="isOpenable(e) ? openSrc(e) : toggleSrc(e.path)">
+                  <span class="icon" aria-hidden="true">{{ isFolderEntry(e) || isControlledTar(e) ? (isControlledTar(e) ? "📦" : "📁") : "📄" }}</span>{{ e.name || e.path }}
                 </td>
                 <td>{{ isFolderEntry(e) ? "—" : formatSize(e.size) }}</td>
                 <td>
@@ -347,8 +480,8 @@ onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } })
                   <input type="radio" name="dst" :disabled="!isFolderEntry(e)"
                     :checked="isDstSelected(e.path)" @change="pickDst(e)" />
                 </td>
-                <td class="name" @click="isFolderEntry(e) ? openDst(e) : undefined">
-                  <span class="icon" aria-hidden="true">{{ isFolderEntry(e) ? "📁" : "📄" }}</span>{{ e.name || e.path }}
+                <td class="name" @click="isOpenable(e) ? openDst(e) : undefined">
+                  <span class="icon" aria-hidden="true">{{ isFolderEntry(e) || isControlledTar(e) ? (isControlledTar(e) ? "📦" : "📁") : "📄" }}</span>{{ e.name || e.path }}
                 </td>
                 <td>{{ isFolderEntry(e) ? "—" : formatSize(e.size) }}</td>
                 <td>
@@ -395,6 +528,12 @@ h2 { margin:0 0 8px; font-size:0.95rem; color:#9db4ff; }
 .field { display:flex; flex-direction:column; gap:4px; font-size:0.8rem; color:#9aa7b8; }
 .field input { background:#0f1419; border:1px solid #2a3442; color:#e7ecf3; border-radius:8px; padding:8px 10px; }
 .batch-name { max-width:420px; }
+.adv-opts { display:flex; flex-wrap:wrap; gap:12px 20px; align-items:flex-end; }
+.regex-field { flex:1; min-width:240px; max-width:520px; }
+.regex-row { display:flex; gap:8px; }
+.regex-row input { flex:1; background:#0f1419; border:1px solid #2a3442; color:#e7ecf3; border-radius:8px; padding:8px 10px; }
+.regex-row select { background:#0f1419; border:1px solid #2a3442; color:#e7ecf3; border-radius:8px; padding:8px 10px; }
+.pack-tar { display:flex; align-items:center; gap:8px; font-size:0.85rem; color:#c5d4ff; cursor:pointer; padding-bottom:8px; user-select:none; }
 .panes { display:grid; grid-template-columns:minmax(0, 1fr) minmax(0, 1fr); gap:12px; min-height:0; flex:1; }
 .panel { background:#171d25; border:1px solid #2a3442; border-radius:12px; padding:12px; display:flex; flex-direction:column; min-height:0; }
 .pane { max-height:calc(100vh - 200px); min-width:0; }

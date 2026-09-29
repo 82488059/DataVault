@@ -2,6 +2,7 @@ mod disk;
 mod hashutil;
 mod job;
 mod vault;
+mod tarutil;
 
 use md5::{Digest, Md5};
 use serde::{Deserialize, Serialize};
@@ -16,6 +17,7 @@ use disk::DiskJson;
 use hashutil::{compute_fast_md5, compute_md5_full};
 use job::JobStart;
 use vault::{ControlledFile, ControlledVerifyReport};
+use tarutil::TarEntryInfo;
 
 const SAMPLE_WINDOW: u64 = 64 * 1024;
 
@@ -58,6 +60,15 @@ pub struct BackupBatch {
     pub sources: Vec<String>,
     pub destination_root: String,
     pub files: Vec<FileMeta>,
+    /// When true, files were packed into one .tar at destination.
+    #[serde(default)]
+    pub pack_as_tar: bool,
+    /// Optional filename regex applied during backup (match or exclude).
+    #[serde(default)]
+    pub name_regex: Option<String>,
+    /// true = exclude matching filenames; false = include only matches.
+    #[serde(default)]
+    pub regex_exclude: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -214,6 +225,62 @@ fn collect_files(src: &Path, base: &Path, out: &mut Vec<(PathBuf, PathBuf)>) -> 
         }
     }
     Ok(())
+}
+
+
+fn compile_name_regex(pattern: &Option<String>) -> Result<Option<regex::Regex>, String> {
+    let Some(raw) = pattern.as_ref() else {
+        return Ok(None);
+    };
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    regex::Regex::new(raw).map(Some).map_err(|e| format!("文件名正则无效: {e}"))
+}
+
+fn filter_collected_by_name(
+    collected: Vec<(PathBuf, PathBuf)>,
+    re: &Option<regex::Regex>,
+    exclude: bool,
+) -> Vec<(PathBuf, PathBuf)> {
+    let Some(re) = re else {
+        return collected;
+    };
+    collected
+        .into_iter()
+        .filter(|(abs, _)| {
+            let name = abs
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
+            tarutil::name_matches(&name, re, exclude)
+        })
+        .collect()
+}
+
+fn is_controlled_tar_file(path: &Path) -> bool {
+    let name_l = path
+        .file_name()
+        .map(|s| s.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    if !name_l.ends_with(".tar") || !path.is_file() {
+        return false;
+    }
+    let Some(root) = disk::drive_root_of(path) else {
+        return false;
+    };
+    if !disk::is_backup_disk(&root) {
+        return false;
+    }
+    let Ok(rel) = vault::normalize_rel_path(&root, path) else {
+        return false;
+    };
+    let Ok(files) = vault::list_controlled_files(&root) else {
+        return false;
+    };
+    let rel_l = rel.to_lowercase();
+    files.iter().any(|f| f.rel_path.eq_ignore_ascii_case(&rel_l))
 }
 
 #[tauri::command]
@@ -462,6 +529,9 @@ fn backup_paths_inner(
     batch_name: Option<String>,
     progress_job_id: Option<String>,
     cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    name_regex: Option<String>,
+    regex_exclude: bool,
+    pack_as_tar: bool,
 ) -> Result<BackupBatch, String> {
     if sources.is_empty() {
         return Err("未选择任何源路径".into());
@@ -469,14 +539,21 @@ fn backup_paths_inner(
     if dest.trim().is_empty() {
         return Err("目标目录为空".into());
     }
+    let re = compile_name_regex(&name_regex)?;
     let dest_root = PathBuf::from(&dest);
     fs::create_dir_all(&dest_root).map_err(|e| format!("创建目标目录失败: {e}"))?;
 
     let batch_id = resolve_batch_id(&app, batch_name)?;
     let mut files_meta: Vec<FileMeta> = Vec::new();
     let mut progress_idx = 0usize;
+    let mut all_collected: Vec<(PathBuf, PathBuf)> = Vec::new();
 
     for src_str in &sources {
+        if let Some(flag) = cancel.as_ref() {
+            if job::is_cancelled(flag) {
+                break;
+            }
+        }
         let src = PathBuf::from(src_str);
         if !src.exists() {
             files_meta.push(FileMeta {
@@ -509,8 +586,95 @@ fn backup_paths_inner(
                 collected.push((abs, top.join(rel)));
             }
         }
+        collected = filter_collected_by_name(collected, &re, regex_exclude);
+        all_collected.extend(collected);
+    }
 
-        for (abs, rel) in collected {
+    if pack_as_tar {
+        if all_collected.is_empty() && files_meta.iter().all(|f| f.error.is_some()) {
+            // keep error metas only
+        } else if all_collected.is_empty() {
+            return Err("正则过滤后没有可备份的文件".into());
+        } else {
+            let tar_name = format!("{batch_id}.tar");
+            let tar_path = dest_root.join(&tar_name);
+            let total = all_collected.len();
+            let app_prog = app.clone();
+            let jid = progress_job_id.clone();
+            let cancel_c = cancel.clone();
+            let size = tarutil::pack_files(&tar_path, &all_collected, |idx, rel_s| {
+                if let Some(flag) = cancel_c.as_ref() {
+                    if job::is_cancelled(flag) {
+                        return;
+                    }
+                }
+                if let Some(jid) = jid.as_ref() {
+                    let _ = app_prog.emit(
+                        "backup-job-progress",
+                        GenericProgress {
+                            job_id: jid.clone(),
+                            phase: "packing".into(),
+                            current: idx,
+                            total,
+                            rel_path: Some(rel_s.to_string()),
+                            message: format!("正在打包 ({idx}/{total}): {rel_s}"),
+                        },
+                    );
+                }
+            })?;
+            if let Some(flag) = cancel.as_ref() {
+                if job::is_cancelled(flag) {
+                    let _ = fs::remove_file(&tar_path);
+                    return Err("已取消".into());
+                }
+            }
+            let quick = compute_md5_quick_legacy(&tar_path).ok();
+            let full = compute_md5_full(&tar_path).ok();
+            let dest_s = tar_path.to_string_lossy().to_string();
+            files_meta.push(FileMeta {
+                rel_path: tar_name.clone(),
+                src_path: "(archive)".into(),
+                dest_path: dest_s.clone(),
+                size,
+                md5_full: full,
+                md5_quick: quick,
+                error: None,
+            });
+            // Register controlled metadata for the archive when dest is a controlled disk.
+            if let Some(root) = disk::drive_root_of(&tar_path) {
+                if disk::is_backup_disk(&root) {
+                    if let Some(jid) = progress_job_id.as_ref() {
+                        let _ = app.emit(
+                            "backup-job-progress",
+                            GenericProgress {
+                                job_id: jid.clone(),
+                                phase: "indexing".into(),
+                                current: total,
+                                total,
+                                rel_path: Some(tar_name.clone()),
+                                message: format!("登记受控元数据: {tar_name}"),
+                            },
+                        );
+                    }
+                    match vault::upsert_controlled_file(
+                        &root,
+                        &tar_path,
+                        hashutil::DEFAULT_SAMPLE_RATIO,
+                        hashutil::DEFAULT_SAMPLE_CHUNK_MB,
+                    ) {
+                        Ok(_) => {}
+                        Err(e) => {
+                            // Non-fatal: backup succeeded; surface in meta error note
+                            if let Some(last) = files_meta.last_mut() {
+                                last.error = Some(format!("已打包，但登记受控失败: {e}"));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        for (abs, rel) in all_collected {
             if let Some(flag) = cancel.as_ref() {
                 if job::is_cancelled(flag) {
                     break;
@@ -581,6 +745,12 @@ fn backup_paths_inner(
         sources: sources.clone(),
         destination_root: dest.clone(),
         files: files_meta,
+        pack_as_tar,
+        name_regex: name_regex
+            .as_ref()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+        regex_exclude,
     };
 
     let meta_dir = metadata_root(&app)?;
@@ -671,6 +841,74 @@ fn verify_backup_inner(
             });
             continue;
         }
+        // Tar archive backup: only the destination .tar exists; check against stored hash.
+        if f.src_path == "(archive)" {
+            let dest = Path::new(&f.dest_path);
+            if !dest.exists() {
+                missing += 1;
+                items.push(VerifyItem {
+                    rel_path: f.rel_path.clone(),
+                    src_path: f.src_path.clone(),
+                    dest_path: f.dest_path.clone(),
+                    src_hash: f.md5_quick.clone().or_else(|| f.md5_full.clone()),
+                    dest_hash: None,
+                    ok: false,
+                    status: "missing".into(),
+                    message: "目标归档缺失".into(),
+                });
+                continue;
+            }
+            let dest_hash_res = if use_full {
+                compute_md5_full(dest)
+            } else {
+                compute_md5_quick_legacy(dest)
+            };
+            match dest_hash_res {
+                Ok(dh) => {
+                    let expected = if use_full {
+                        f.md5_full.clone().or_else(|| f.md5_quick.clone())
+                    } else {
+                        f.md5_quick.clone().or_else(|| f.md5_full.clone())
+                    };
+                    let (ok, message) = match &expected {
+                        Some(exp) if exp == &dh => (true, "通过".to_string()),
+                        Some(_) => (false, "哈希不一致".to_string()),
+                        None => (true, "归档可读（无存哈希）".to_string()),
+                    };
+                    if ok {
+                        passed += 1;
+                    } else {
+                        failed += 1;
+                    }
+                    items.push(VerifyItem {
+                        rel_path: f.rel_path.clone(),
+                        src_path: f.src_path.clone(),
+                        dest_path: f.dest_path.clone(),
+                        src_hash: expected,
+                        dest_hash: Some(dh),
+                        ok,
+                        status: if ok { "pass".into() } else { "fail".into() },
+                        message,
+                    });
+                }
+                Err(e) => {
+                    errors += 1;
+                    items.push(VerifyItem {
+                        rel_path: f.rel_path.clone(),
+                        src_path: f.src_path.clone(),
+                        dest_path: f.dest_path.clone(),
+                        src_hash: None,
+                        dest_hash: None,
+                        ok: false,
+                        status: "error".into(),
+                        message: e,
+                    });
+                }
+            }
+            continue;
+        }
+
+
         let src = Path::new(&f.src_path);
         let dest = Path::new(&f.dest_path);
         if !src.exists() || !dest.exists() {
@@ -797,8 +1035,21 @@ fn backup_paths(
     sources: Vec<String>,
     dest: String,
     batch_name: Option<String>,
+    name_regex: Option<String>,
+    regex_exclude: Option<bool>,
+    pack_as_tar: Option<bool>,
 ) -> Result<BackupBatch, String> {
-    backup_paths_inner(app, sources, dest, batch_name, None, None)
+    backup_paths_inner(
+        app,
+        sources,
+        dest,
+        batch_name,
+        None,
+        None,
+        name_regex,
+        regex_exclude.unwrap_or(false),
+        pack_as_tar.unwrap_or(false),
+    )
 }
 
 #[tauri::command]
@@ -826,6 +1077,9 @@ fn start_backup(
     sources: Vec<String>,
     dest: String,
     batch_name: Option<String>,
+    name_regex: Option<String>,
+    regex_exclude: Option<bool>,
+    pack_as_tar: Option<bool>,
 ) -> Result<JobStart, String> {
     if sources.is_empty() {
         return Err("未选择任何源路径".into());
@@ -867,7 +1121,7 @@ fn start_backup(
                 job::finish_job(&job_id);
                 return;
             }
-            let result = backup_paths_inner(app.clone(), sources, dest, batch_name, Some(job_id.clone()), Some(cancel.clone()));
+            let result = backup_paths_inner(app.clone(), sources, dest, batch_name, Some(job_id.clone()), Some(cancel.clone()), name_regex, regex_exclude.unwrap_or(false), pack_as_tar.unwrap_or(false));
             match result {
                 Ok(batch) => {
                     let cancelled = job::is_cancelled(&cancel);
@@ -1352,6 +1606,16 @@ fn start_dir_file_counts(app: tauri::AppHandle, paths: Vec<String>) -> Result<u6
     Ok(job_id)
 }
 
+
+#[tauri::command]
+fn list_tar_entries(path: String, prefix: Option<String>) -> Result<Vec<TarEntryInfo>, String> {
+    let p = PathBuf::from(&path);
+    if !is_controlled_tar_file(&p) {
+        return Err("仅可展开已登记为受控的 .tar 归档".into());
+    }
+    tarutil::list_entries(&p, prefix.as_deref().unwrap_or(""))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1371,6 +1635,7 @@ pub fn run() {
             verify_controlled_full,
             verify_controlled_quick,
             list_dir,
+            list_tar_entries,
             start_dir_file_counts,
             md5_full,
             md5_quick,

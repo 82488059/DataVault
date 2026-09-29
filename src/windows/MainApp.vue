@@ -67,6 +67,7 @@ interface ActiveJob {
 
 const currentPath = ref("");
 const entries = ref<DirEntryInfo[]>([]);
+const tarBrowse = ref<{ tarPath: string; prefix: string } | null>(null);
 
 interface DirCountUpdate {
   job_id: number; path: string; controlled_count: number; total_files: number;
@@ -339,8 +340,34 @@ async function refreshBatches() {
   } catch { batchIds.value = []; }
 }
 
+
+function isControlledTar(e: DirEntryInfo): boolean {
+  return !e.is_dir && !!e.is_controlled && e.name.toLowerCase().endsWith(".tar");
+}
+async function loadTarView() {
+  if (!tarBrowse.value) return;
+  const { tarPath, prefix } = tarBrowse.value;
+  const raw = await invoke<{ name: string; tar_path: string; rel_path: string; is_dir: boolean; size: number }[]>(
+    "list_tar_entries",
+    { path: tarPath, prefix: prefix || null },
+  );
+  entries.value = raw.map((t) => ({
+    name: t.name,
+    path: `${t.tar_path}::${t.rel_path}`,
+    is_dir: t.is_dir,
+    size: t.size,
+    is_backup_disk: false,
+    is_controlled: true,
+    controlled_count: null,
+    total_files: null,
+  }));
+  currentPath.value = prefix ? `${tarPath} :: ${prefix}` : `${tarPath} :: /`;
+  selected.value = new Set();
+}
+
 async function loadDir(path: string) {
-  errorMsg.value = "";
+  
+  tarBrowse.value = null;errorMsg.value = "";
   busy.value = true;
   try {
     const raw = await invoke<DirEntryInfo[]>("list_dir", { path });
@@ -360,6 +387,22 @@ async function loadDir(path: string) {
 
 async function goRoot() { await loadDir(""); }
 async function goUp() {
+  if (tarBrowse.value) {
+    const pref = tarBrowse.value.prefix.replace(/\/+$/, "");
+    if (!pref) {
+      const tarPath = tarBrowse.value.tarPath;
+      const parent = tarPath.replace(/[\\/]+$/, "");
+      const i = Math.max(parent.lastIndexOf("\\"), parent.lastIndexOf("/"));
+      tarBrowse.value = null;
+      await loadDir(i > 0 ? parent.slice(0, i + 1) : "");
+      return;
+    }
+    const i = pref.lastIndexOf("/");
+    tarBrowse.value = { tarPath: tarBrowse.value.tarPath, prefix: i >= 0 ? pref.slice(0, i) : "" };
+    try { await loadTarView(); } catch (err) { errorMsg.value = String(err); }
+    return;
+  }
+
   if (!currentPath.value) return;
   const p = currentPath.value.replace(/[\\/]+$/, "");
   const m = p.match(/^([A-Za-z]:)(?:\\|$)/);
@@ -367,6 +410,7 @@ async function goUp() {
   const idx = Math.max(p.lastIndexOf("\\"), p.lastIndexOf("/"));
   if (idx <= 2) await loadDir(p.slice(0, 3));
   else await loadDir(p.slice(0, idx));
+
 }
 
 function toggleSelect(path: string) {
@@ -376,7 +420,20 @@ function toggleSelect(path: string) {
 }
 function selectAllFiles() { selected.value = new Set(entries.value.map((e) => e.path)); }
 function clearSelection() { selected.value = new Set(); }
-async function openEntry(e: DirEntryInfo) { if (e.is_dir) await loadDir(e.path); }
+async function openEntry(e: DirEntryInfo) {
+  if (tarBrowse.value && e.is_dir) {
+    const rel = e.path.includes("::") ? e.path.split("::").slice(1).join("::") : e.path;
+    tarBrowse.value = { tarPath: tarBrowse.value.tarPath, prefix: rel.replace(/\/+$/, "") };
+    try { await loadTarView(); } catch (err) { errorMsg.value = String(err); }
+    return;
+  }
+  if (isControlledTar(e)) {
+    tarBrowse.value = { tarPath: e.path, prefix: "" };
+    try { await loadTarView(); } catch (err) { errorMsg.value = String(err); }
+    return;
+  }
+  if (e.is_dir) await loadDir(e.path);
+}
 
 function useSelectedAsSources() {
   if (!selected.value.size) { errorMsg.value = "请先勾选要作为备份源的项"; return; }
@@ -658,7 +715,7 @@ onUnmounted(() => { for (const u of unlisteners) u(); unlisteners = []; });
             <tbody>
               <tr v-for="e in entries" :key="e.path" :class="{ selected: selected.has(e.path) }" @dblclick="openEntry(e)">
                 <td><input type="checkbox" :checked="selected.has(e.path)" @change="toggleSelect(e.path)" /></td>
-                <td class="name" @click="e.is_dir ? openEntry(e) : toggleSelect(e.path)">
+                <td class="name" @click="(e.is_dir || isControlledTar(e)) ? openEntry(e) : toggleSelect(e.path)">
                   <span class="icon" aria-hidden="true">{{ e.is_dir || isDriveRootPath(e.path) ? "📁" : "📄" }}</span>{{ e.name }}
                 </td>
                 <td>{{ e.is_dir || isDriveRootPath(e.path) ? "—" : formatSize(e.size) }}</td>

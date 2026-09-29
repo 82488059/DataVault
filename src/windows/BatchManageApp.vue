@@ -98,6 +98,7 @@ function statusLabel(status: string): string {
 }
 const unlisteners: UnlistenFn[] = [];
 
+const tarBrowse = ref<{ tarPath: string; prefix: string } | null>(null);
 const dirPath = ref("");
 const dirEntries = ref<DirEntry[]>([]);
 
@@ -190,7 +191,33 @@ function toggleAll() {
   else selected.value = new Set(rows.value.map((r) => r.id));
 }
 
+
+function isControlledTar(e: DirEntry): boolean {
+  return !e.is_dir && !!e.is_controlled && e.name.toLowerCase().endsWith(".tar");
+}
+async function loadTarView() {
+  if (!tarBrowse.value) return;
+  const { tarPath, prefix } = tarBrowse.value;
+  const raw = await invoke<{ name: string; tar_path: string; rel_path: string; is_dir: boolean; size: number }[]>(
+    "list_tar_entries",
+    { path: tarPath, prefix: prefix || null },
+  );
+  dirEntries.value = raw.map((t) => ({
+    name: t.name,
+    path: `${t.tar_path}::${t.rel_path}`,
+    is_dir: t.is_dir,
+    size: t.size,
+    is_backup_disk: false,
+    is_controlled: true,
+    controlled_count: null,
+    total_files: null,
+  }));
+  dirPath.value = prefix ? `${tarPath} :: ${prefix}` : `${tarPath} :: /`;
+  dirSelected.value = new Set();
+}
+
 async function loadDir(path: string) {
+  tarBrowse.value = null;
   errorMsg.value = "";
   try {
     if (!path) {
@@ -212,9 +239,36 @@ async function loadDir(path: string) {
 }
 
 function openDirEntry(e: DirEntry) {
+  if (tarBrowse.value && e.is_dir) {
+    const rel = e.path.includes("::") ? e.path.split("::").slice(1).join("::") : e.path;
+    tarBrowse.value = { tarPath: tarBrowse.value.tarPath, prefix: rel.replace(/\/+$/, "") };
+    void loadTarView().catch((err) => { errorMsg.value = String(err); });
+    return;
+  }
+  if (isControlledTar(e)) {
+    tarBrowse.value = { tarPath: e.path, prefix: "" };
+    void loadTarView().catch((err) => { errorMsg.value = String(err); });
+    return;
+  }
   if (e.is_dir || e.is_backup_disk || isDriveRoot(e.path)) void loadDir(e.path);
 }
 function dirUp() {
+  if (tarBrowse.value) {
+    const pref = tarBrowse.value.prefix.replace(/\/+$/, "");
+    if (!pref) {
+      const tarPath = tarBrowse.value.tarPath;
+      const parent = tarPath.replace(/[\\/]+$/, "");
+      const i = Math.max(parent.lastIndexOf("\\"), parent.lastIndexOf("/"));
+      tarBrowse.value = null;
+      void loadDir(i > 0 ? parent.slice(0, i + 1) : "");
+      return;
+    }
+    const i = pref.lastIndexOf("/");
+    tarBrowse.value = { tarPath: tarBrowse.value.tarPath, prefix: i >= 0 ? pref.slice(0, i) : "" };
+    void loadTarView().catch((err) => { errorMsg.value = String(err); });
+    return;
+  }
+
   if (!dirPath.value) return;
   if (isDriveRoot(dirPath.value)) void loadDir("");
   else {
@@ -222,6 +276,7 @@ function dirUp() {
     const i = Math.max(p.lastIndexOf("\\"), p.lastIndexOf("/"));
     void loadDir(i > 0 ? p.slice(0, i + 1) : "");
   }
+
 }
 function toggleDir(path: string) {
   const next = new Set(dirSelected.value);
@@ -353,7 +408,7 @@ onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } })
             <tbody>
               <tr v-for="e in dirEntries" :key="'d-'+e.path" :class="{ selected: dirSelected.has(e.path) }" @dblclick="openDirEntry(e)">
                 <td @click.stop><input type="checkbox" :checked="dirSelected.has(e.path)" @change="toggleDir(e.path)" /></td>
-                <td class="name" @click="(e.is_dir || e.is_backup_disk || isDriveRoot(e.path)) ? openDirEntry(e) : toggleDir(e.path)">
+                <td class="name" @click="(e.is_dir || e.is_backup_disk || isDriveRoot(e.path) || isControlledTar(e)) ? openDirEntry(e) : toggleDir(e.path)">
                   <span class="icon" aria-hidden="true">{{ (e.is_dir || e.is_backup_disk || isDriveRoot(e.path)) ? "📁" : "📄" }}</span>{{ e.name || e.path }}
                 </td>
                 <td>{{ e.is_dir || e.is_backup_disk ? "—" : formatSize(e.size) }}</td>
