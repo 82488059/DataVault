@@ -405,7 +405,7 @@ onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } })
     <div class="adv-opts">
       <label class="field regex-field"><span>源文件名正则（可选；匹配文件名非路径）</span>
         <div class="regex-row">
-          <input v-model="nameRegex" type="text" placeholder="例如 \.pdf$ 或 ^report" title="Rust/JS 风格正则，作用于文件名" />
+          <input v-model="nameRegex" type="text" placeholder="例如 \.pdf$ 或 /\.exe$/i" title="Rust 正则，或 JS 风格 /pattern/flags（i=忽略大小写）；匹配文件名非路径" />
           <select v-model="regexMode" title="匹配=仅备份匹配项；排除=跳过匹配项">
             <option value="include">匹配</option>
             <option value="exclude">排除</option>

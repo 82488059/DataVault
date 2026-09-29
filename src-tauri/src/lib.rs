@@ -228,6 +228,42 @@ fn collect_files(src: &Path, base: &Path, out: &mut Vec<(PathBuf, PathBuf)>) -> 
 }
 
 
+/// Parse optional JS-style `/pattern/flags` (e.g. `/\.exe$/i`).
+/// Returns `(pattern, flags)` when delimiters are present; otherwise `None`.
+fn parse_slash_delimited_regex(raw: &str) -> Option<(&str, &str)> {
+    let s = raw.trim();
+    if !s.starts_with('/') || s.len() < 2 {
+        return None;
+    }
+    let bytes = s.as_bytes();
+    let mut i = 1usize;
+    let mut escaped = false;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if escaped {
+            escaped = false;
+            i += 1;
+            continue;
+        }
+        if b == b'\\' {
+            escaped = true;
+            i += 1;
+            continue;
+        }
+        if b == b'/' {
+            let pattern = &s[1..i];
+            let flags = &s[i + 1..];
+            // Require a non-empty pattern; reject bare `//flags`.
+            if pattern.is_empty() {
+                return None;
+            }
+            return Some((pattern, flags));
+        }
+        i += 1;
+    }
+    None
+}
+
 fn compile_name_regex(pattern: &Option<String>) -> Result<Option<regex::Regex>, String> {
     let Some(raw) = pattern.as_ref() else {
         return Ok(None);
@@ -236,7 +272,36 @@ fn compile_name_regex(pattern: &Option<String>) -> Result<Option<regex::Regex>, 
     if raw.is_empty() {
         return Ok(None);
     }
-    regex::Regex::new(raw).map(Some).map_err(|e| format!("文件名正则无效: {e}"))
+    let (body, flags) = match parse_slash_delimited_regex(raw) {
+        Some((p, f)) => (p.to_string(), f.to_string()),
+        None => (raw.to_string(), String::new()),
+    };
+    let mut builder = regex::RegexBuilder::new(&body);
+    for ch in flags.chars() {
+        match ch {
+            'i' | 'I' => {
+                builder.case_insensitive(true);
+            }
+            'm' | 'M' => {
+                builder.multi_line(true);
+            }
+            's' | 'S' => {
+                builder.dot_matches_new_line(true);
+            }
+            'x' | 'X' => {
+                builder.ignore_whitespace(true);
+            }
+            // JS `g`/`u`/`y` have no effect for filename is_match; ignore quietly.
+            'g' | 'G' | 'u' | 'U' | 'y' | 'Y' => {}
+            other => {
+                return Err(format!("不支持的正则标志: {other}"));
+            }
+        }
+    }
+    builder
+        .build()
+        .map(Some)
+        .map_err(|e| format!("文件名正则无效: {e}"))
 }
 
 fn filter_collected_by_name(
@@ -1652,4 +1717,50 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod name_regex_tests {
+    use super::{compile_name_regex, parse_slash_delimited_regex};
+    use crate::tarutil;
+
+    #[test]
+    fn parse_slash_form_with_flags() {
+        let (p, f) = parse_slash_delimited_regex(r"/\.exe$/i").unwrap();
+        assert_eq!(p, r"\.exe$");
+        assert_eq!(f, "i");
+    }
+
+    #[test]
+    fn bare_pattern_not_slash_form() {
+        assert!(parse_slash_delimited_regex(r"\.exe$").is_none());
+    }
+
+    #[test]
+    fn exclude_exe_case_insensitive_slash_form() {
+        let re = compile_name_regex(&Some(r"/\.exe$/i".into()))
+            .unwrap()
+            .unwrap();
+        assert!(tarutil::name_matches("tool.exe", &re, true) == false);
+        assert!(tarutil::name_matches("TOOL.EXE", &re, true) == false);
+        assert!(tarutil::name_matches("readme.txt", &re, true));
+        assert!(tarutil::name_matches("lib.dll", &re, true));
+    }
+
+    #[test]
+    fn include_pdf_bare() {
+        let re = compile_name_regex(&Some(r"\.pdf$".into()))
+            .unwrap()
+            .unwrap();
+        assert!(tarutil::name_matches("a.pdf", &re, false));
+        assert!(!tarutil::name_matches("a.PDF", &re, false));
+        assert!(!tarutil::name_matches("a.txt", &re, false));
+    }
+
+    #[test]
+    fn literal_slash_form_without_flags_still_works() {
+        // Unclosed /pattern is treated as raw Rust regex (legacy).
+        let re = compile_name_regex(&Some(r"/foo".into())).unwrap().unwrap();
+        assert!(re.is_match("/foo"));
+    }
 }
