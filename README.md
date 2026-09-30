@@ -31,7 +31,7 @@
 ## 安装与运行
 
 ```powershell
-cd F:\Gitee\DataVault
+cd E:\Repos\DataVault
 $env:PATH = "$env:USERPROFILE\.cargo\bin;" + $env:PATH
 npm install
 npm run tauri dev
