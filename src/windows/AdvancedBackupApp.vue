@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { useVirtualList } from "../virtualList";
 
 interface DirEntry {
   name: string; path: string; is_dir: boolean; size: number;
@@ -29,6 +30,14 @@ const srcPath = ref("");
 const dstPath = ref("");
 const srcEntries = ref<DirEntry[]>([]);
 const dstEntries = ref<DirEntry[]>([]);
+const {
+  windowed: srcWindowed, range: srcRange, slice: shownSrc,
+  onScroll: onSrcScroll, setScroller: setSrcScroller,
+} = useVirtualList(srcEntries, 36, 200, srcPath);
+const {
+  windowed: dstWindowed, range: dstRange, slice: shownDst,
+  onScroll: onDstScroll, setScroller: setDstScroller,
+} = useVirtualList(dstEntries, 36, 200, dstPath);
 const srcSelected = ref<Set<string>>(new Set());
 const dstSelected = ref<string>("");
 const backupRoots = ref<Set<string>>(new Set());
@@ -428,7 +437,7 @@ onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } })
           <span class="muted">已选 {{ srcSelected.size }}</span>
         </div>
         <code class="path">{{ srcPath || "此电脑（盘符）" }}</code>
-        <div class="table-wrap">
+        <div class="table-wrap" :class="{ windowed: srcWindowed }" :ref="setSrcScroller" @scroll="onSrcScroll">
           <table>
             <thead>
               <tr>
@@ -437,7 +446,8 @@ onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } })
               </tr>
             </thead>
             <tbody>
-              <tr v-for="e in srcEntries" :key="'s-'+e.path" :class="{ selected: srcSelected.has(e.path) }" @dblclick="openSrc(e)">
+              <tr v-if="srcRange.padTop" class="vpad" aria-hidden="true"><td colspan="5" :style="{ height: srcRange.padTop + 'px', padding: 0, border: 'none' }"></td></tr>
+              <tr v-for="e in shownSrc" :key="'s-'+e.path" :class="{ selected: srcSelected.has(e.path) }" @dblclick="openSrc(e)">
                 <td @click.stop><input type="checkbox" :checked="srcSelected.has(e.path)" @change="toggleSrc(e.path)" /></td>
                 <td class="name" @click="isOpenable(e) ? openSrc(e) : toggleSrc(e.path)">
                   <span class="icon" aria-hidden="true">{{ isFolderEntry(e) || isControlledTar(e) ? (isControlledTar(e) ? "📦" : "📁") : "📄" }}</span>{{ e.name || e.path }}
@@ -450,6 +460,7 @@ onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } })
                   <span v-if="e.is_dir && e.is_controlled" title="受控文件数/总文件数">{{ e.controlled_count != null && e.total_files != null ? e.controlled_count + '/' + e.total_files : '…' }}</span>
                 </td>
               </tr>
+              <tr v-if="srcRange.padBottom" class="vpad" aria-hidden="true"><td colspan="5" :style="{ height: srcRange.padBottom + 'px', padding: 0, border: 'none' }"></td></tr>
               <tr v-if="!srcEntries.length"><td colspan="5" class="muted center">空目录或无法访问</td></tr>
             </tbody>
           </table>
@@ -464,7 +475,7 @@ onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } })
           <span class="muted">{{ dstSelected ? "已选 " + dstSelected : "未选目标" }}</span>
         </div>
         <code class="path">{{ dstPath || "此电脑（盘符）" }}</code>
-        <div class="table-wrap">
+        <div class="table-wrap" :class="{ windowed: dstWindowed }" :ref="setDstScroller" @scroll="onDstScroll">
           <table>
             <thead>
               <tr>
@@ -473,7 +484,8 @@ onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } })
               </tr>
             </thead>
             <tbody>
-              <tr v-for="e in dstEntries" :key="'d-'+e.path"
+              <tr v-if="dstRange.padTop" class="vpad" aria-hidden="true"><td colspan="5" :style="{ height: dstRange.padTop + 'px', padding: 0, border: 'none' }"></td></tr>
+              <tr v-for="e in shownDst" :key="'d-'+e.path"
                 :class="{ selected: isDstSelected(e.path), disabled: !isFolderEntry(e) }"
                 @dblclick="openDst(e)">
                 <td @click.stop>
@@ -491,6 +503,7 @@ onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } })
                   <span v-if="e.is_dir && e.is_controlled" title="受控文件数/总文件数">{{ e.controlled_count != null && e.total_files != null ? e.controlled_count + '/' + e.total_files : '…' }}</span>
                 </td>
               </tr>
+              <tr v-if="dstRange.padBottom" class="vpad" aria-hidden="true"><td colspan="5" :style="{ height: dstRange.padBottom + 'px', padding: 0, border: 'none' }"></td></tr>
               <tr v-if="!dstEntries.length && !dstPath">
                 <td colspan="5" class="muted center">无可用盘符</td>
               </tr>

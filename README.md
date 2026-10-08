@@ -13,7 +13,7 @@
 ## 功能概览
 
 - 资源管理器式浏览本机盘符 / 文件夹 / 文件（列：**名称 / 大小 / 受控 / 数量**）；长文件名自动换行
-- **标记为受控**（盘符根 `.datavault`）；**建立备份索引**（单一按钮，合并原「添加受控」）登记受控文件
+- **标记为受控**（盘符根 `.datavault`）；**建立备份索引**登记受控文件
 - 批次备份到目标目录，并写入批次元数据（可选批次名称）
 - **完整校验**：整文件 MD5；**快速校验**：FastMD5（默认每 100MB 块取前 10%）
 - 主窗**多任务状态面板**；校验结果四态：通过 / 失败 / 缺失 / 错误
@@ -62,8 +62,6 @@ cmd /c `"D:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\B
 
 默认参数：`sample_chunk_mb=100`，`sample_ratio=0.10`。按块取前 10%（含余块）馈入同一 MD5。详见 [受控文件设计](docs/superpowers/specs/2026-09-28-backup-disk-controlled-files-design.md)。
 
-> 脚手架早期「头/尾 64KiB + 文件大小 ASCII」方案**已废弃**，不再用于受控文件校验。
-
 ## 元数据
 
 - 盘根：`.datavault/disk.json`、`.datavault/vault.db`
@@ -76,3 +74,4 @@ cmd /c `"D:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\B
 - [需求说明](docs/需求说明.md)
 - [架构设计](docs/架构设计.md)
 - [开发计划](docs/开发计划.md)
+- [优化方向](docs/优化方向.md)

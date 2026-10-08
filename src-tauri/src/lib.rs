@@ -7,14 +7,14 @@ mod tarutil;
 use md5::{Digest, Md5};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use tauri::{Emitter, Manager};
 
 use disk::DiskJson;
-use hashutil::{compute_fast_md5, compute_md5_full};
+use hashutil::{compute_fast_md5, compute_md5_full, compute_md5_pair};
 use job::JobStart;
 use vault::{ControlledFile, ControlledVerifyReport};
 use tarutil::TarEntryInfo;
@@ -199,6 +199,57 @@ fn compute_md5_quick_legacy(path: &Path) -> Result<String, String> {
 
     hasher.update(size.to_string().as_bytes());
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// Feed the same head/tail windows as [`compute_md5_quick_legacy`] while bytes stream past `pos`.
+fn feed_legacy_quick(hasher: &mut Md5, data: &[u8], pos: u64, size: u64) {
+    if size == 0 || data.is_empty() {
+        return;
+    }
+    let end = pos + data.len() as u64;
+    if size <= SAMPLE_WINDOW * 2 {
+        hasher.update(data);
+        return;
+    }
+    let head_end = SAMPLE_WINDOW;
+    if pos < head_end {
+        let b = end.min(head_end);
+        if b > pos {
+            hasher.update(&data[..(b - pos) as usize]);
+        }
+    }
+    let tail_start = size - SAMPLE_WINDOW;
+    if end > tail_start {
+        let a = pos.max(tail_start);
+        let b = end.min(size);
+        if b > a {
+            hasher.update(&data[(a - pos) as usize..(b - pos) as usize]);
+        }
+    }
+}
+
+/// Copy `src` to `dest` and return `(bytes, legacy quick md5)` from that single read.
+fn copy_with_legacy_quick(src: &Path, dest: &Path) -> Result<(u64, String), String> {
+    let meta = fs::metadata(src).map_err(|e| format!("元数据失败 {}: {e}", src.display()))?;
+    let size = meta.len();
+    let mut input = File::open(src).map_err(|e| format!("打开失败 {}: {e}", src.display()))?;
+    let mut output = File::create(dest).map_err(|e| format!("创建目标失败 {}: {e}", dest.display()))?;
+    let mut hasher = Md5::new();
+    let mut buf = vec![0u8; hashutil::READ_BUF_SIZE];
+    let mut pos = 0u64;
+    loop {
+        let n = input.read(&mut buf).map_err(|e| format!("读取失败: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        output
+            .write_all(&buf[..n])
+            .map_err(|e| format!("写入失败: {e}"))?;
+        feed_legacy_quick(&mut hasher, &buf[..n], pos, size);
+        pos += n as u64;
+    }
+    hasher.update(size.to_string().as_bytes());
+    Ok((size, format!("{:x}", hasher.finalize())))
 }
 
 fn collect_files(src: &Path, base: &Path, out: &mut Vec<(PathBuf, PathBuf)>) -> Result<(), String> {
@@ -490,25 +541,19 @@ fn list_dir(path: String) -> Result<Vec<DirEntryInfo>, String> {
         return Err(format!("不是目录: {path}"));
     }
 
-    // Controlled-status overlay when browsing a backup disk
+    // Controlled-status overlay when browsing a backup disk. Paths only.
     let drive_root = disk::drive_root_of(&p);
-    let controlled_rels: Vec<String> = if let Some(ref root) = drive_root {
+    let controlled_index = if let Some(ref root) = drive_root {
         if disk::is_backup_disk(root) {
-            vault::list_controlled_files(root)
-                .unwrap_or_default()
-                .into_iter()
-                .map(|f| f.rel_path)
-                .collect()
+            vault::list_controlled_rel_paths(root)
+                .ok()
+                .map(vault::ControlledPathIndex::from_paths)
         } else {
-            Vec::new()
+            None
         }
     } else {
-        Vec::new()
+        None
     };
-    let controlled_lower: Vec<String> = controlled_rels
-        .iter()
-        .map(|s| s.to_lowercase())
-        .collect();
 
     let mut items = Vec::new();
     let entries = fs::read_dir(&p).map_err(|e| format!("无法读取目录（可能无权限）: {e}"))?;
@@ -517,29 +562,30 @@ fn list_dir(path: String) -> Result<Vec<DirEntryInfo>, String> {
             Ok(e) => e,
             Err(_) => continue,
         };
-        let ep = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
         if name.eq_ignore_ascii_case(disk::META_DIR) {
             continue;
         }
-        let is_dir = ep.is_dir();
+        let ft = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(_) => continue,
+        };
+        let is_dir = ft.is_dir();
+        let ep = entry.path();
         let size = if is_dir {
             0
         } else {
-            fs::metadata(&ep).map(|m| m.len()).unwrap_or(0)
+            entry.metadata().map(|m| m.len()).unwrap_or(0)
         };
 
-        let is_controlled = if controlled_lower.is_empty() {
-            false
-        } else if let Some(ref root) = drive_root {
+        let is_controlled = if let (Some(index), Some(root)) = (&controlled_index, &drive_root) {
             match vault::normalize_rel_path(root, &ep) {
                 Ok(rel) => {
                     let rel_l = rel.to_lowercase();
                     if is_dir {
-                        let prefix = format!("{rel_l}\\");
-                        controlled_lower.iter().any(|c| c.starts_with(&prefix))
+                        index.dir_has_controlled(&rel_l)
                     } else {
-                        controlled_lower.iter().any(|c| c == &rel_l)
+                        index.contains_file(&rel_l)
                     }
                 }
                 Err(_) => false,
@@ -667,6 +713,7 @@ fn backup_paths_inner(
             let app_prog = app.clone();
             let jid = progress_job_id.clone();
             let cancel_c = cancel.clone();
+            let mut gate = job::ProgressGate::new();
             let size = tarutil::pack_files(&tar_path, &all_collected, |idx, rel_s| {
                 if let Some(flag) = cancel_c.as_ref() {
                     if job::is_cancelled(flag) {
@@ -674,17 +721,19 @@ fn backup_paths_inner(
                     }
                 }
                 if let Some(jid) = jid.as_ref() {
-                    let _ = app_prog.emit(
-                        "backup-job-progress",
-                        GenericProgress {
-                            job_id: jid.clone(),
-                            phase: "packing".into(),
-                            current: idx,
-                            total,
-                            rel_path: Some(rel_s.to_string()),
-                            message: format!("正在打包 ({idx}/{total}): {rel_s}"),
-                        },
-                    );
+                    if gate.due(idx == total) {
+                        let _ = app_prog.emit(
+                            "backup-job-progress",
+                            GenericProgress {
+                                job_id: jid.clone(),
+                                phase: "packing".into(),
+                                current: idx,
+                                total,
+                                rel_path: Some(rel_s.to_string()),
+                                message: format!("正在打包 ({idx}/{total}): {rel_s}"),
+                            },
+                        );
+                    }
                 }
             })?;
             if let Some(flag) = cancel.as_ref() {
@@ -693,15 +742,20 @@ fn backup_paths_inner(
                     return Err("已取消".into());
                 }
             }
+            let pair = compute_md5_pair(
+                &tar_path,
+                hashutil::DEFAULT_SAMPLE_RATIO,
+                hashutil::DEFAULT_SAMPLE_CHUNK_MB,
+            )
+            .ok();
             let quick = compute_md5_quick_legacy(&tar_path).ok();
-            let full = compute_md5_full(&tar_path).ok();
             let dest_s = tar_path.to_string_lossy().to_string();
             files_meta.push(FileMeta {
                 rel_path: tar_name.clone(),
                 src_path: "(archive)".into(),
                 dest_path: dest_s.clone(),
                 size,
-                md5_full: full,
+                md5_full: pair.as_ref().map(|p| p.md5.clone()),
                 md5_quick: quick,
                 error: None,
             });
@@ -721,12 +775,19 @@ fn backup_paths_inner(
                             },
                         );
                     }
-                    match vault::upsert_controlled_file(
-                        &root,
-                        &tar_path,
-                        hashutil::DEFAULT_SAMPLE_RATIO,
-                        hashutil::DEFAULT_SAMPLE_CHUNK_MB,
-                    ) {
+                    let registered = if let Some(pair) = pair.as_ref() {
+                        vault::upsert_prehashed(
+                            &root,
+                            &tar_path,
+                            &pair.md5,
+                            &pair.fast_md5,
+                            hashutil::DEFAULT_SAMPLE_RATIO,
+                            hashutil::DEFAULT_SAMPLE_CHUNK_MB,
+                        )
+                    } else {
+                        Err("计算归档哈希失败".into())
+                    };
+                    match registered {
                         Ok(_) => {}
                         Err(e) => {
                             // Non-fatal: backup succeeded; surface in meta error note
@@ -739,6 +800,8 @@ fn backup_paths_inner(
             }
         }
     } else {
+        let copy_total = all_collected.len();
+        let mut copy_gate = job::ProgressGate::new();
         for (abs, rel) in all_collected {
             if let Some(flag) = cancel.as_ref() {
                 if job::is_cancelled(flag) {
@@ -748,17 +811,19 @@ fn backup_paths_inner(
             progress_idx += 1;
             let rel_s = rel.to_string_lossy().to_string();
             if let Some(jid) = progress_job_id.as_ref() {
-                let _ = app.emit(
-                    "backup-job-progress",
-                    GenericProgress {
-                        job_id: jid.clone(),
-                        phase: "copying".into(),
-                        current: progress_idx,
-                        total: 0,
-                        rel_path: Some(rel_s.clone()),
-                        message: format!("正在复制: {rel_s}"),
-                    },
-                );
+                if copy_gate.due(progress_idx == copy_total) {
+                    let _ = app.emit(
+                        "backup-job-progress",
+                        GenericProgress {
+                            job_id: jid.clone(),
+                            phase: "copying".into(),
+                            current: progress_idx,
+                            total: copy_total,
+                            rel_path: Some(rel_s.clone()),
+                            message: format!("正在复制 ({progress_idx}/{copy_total}): {rel_s}"),
+                        },
+                    );
+                }
             }
             let dest_path = dest_root.join(&rel);
             if let Some(parent) = dest_path.parent() {
@@ -775,21 +840,20 @@ fn backup_paths_inner(
                     continue;
                 }
             }
-            match fs::copy(&abs, &dest_path) {
-                Ok(_) => {
-                    let size = fs::metadata(&dest_path).map(|m| m.len()).unwrap_or(0);
-                    let quick = compute_md5_quick_legacy(&abs).ok();
+            match copy_with_legacy_quick(&abs, &dest_path) {
+                Ok((size, quick)) => {
                     files_meta.push(FileMeta {
                         rel_path: rel.to_string_lossy().to_string(),
                         src_path: abs.to_string_lossy().to_string(),
                         dest_path: dest_path.to_string_lossy().to_string(),
                         size,
                         md5_full: None,
-                        md5_quick: quick,
+                        md5_quick: Some(quick),
                         error: None,
                     });
                 }
                 Err(e) => {
+                    let _ = fs::remove_file(&dest_path);
                     files_meta.push(FileMeta {
                         rel_path: rel.to_string_lossy().to_string(),
                         src_path: abs.to_string_lossy().to_string(),
@@ -873,24 +937,28 @@ fn verify_backup_inner(
     let mut errors = 0usize;
 
     let total = batch.files.len();
+    let mut verify_gate = job::ProgressGate::new();
     for (i, f) in batch.files.iter().enumerate() {
         if let Some(flag) = cancel.as_ref() {
             if job::is_cancelled(flag) {
                 break;
             }
         }
+        let current = i + 1;
         if let Some(jid) = progress_job_id.as_ref() {
-            let _ = app.emit(
-                "verify-job-progress",
-                GenericProgress {
-                    job_id: jid.clone(),
-                    phase: "verifying".into(),
-                    current: i + 1,
-                    total,
-                    rel_path: Some(f.rel_path.clone()),
-                    message: format!("正在校验 ({}/{total}): {}", i + 1, f.rel_path),
-                },
-            );
+            if verify_gate.due(current == total) {
+                let _ = app.emit(
+                    "verify-job-progress",
+                    GenericProgress {
+                        job_id: jid.clone(),
+                        phase: "verifying".into(),
+                        current,
+                        total,
+                        rel_path: Some(f.rel_path.clone()),
+                        message: format!("正在校验 ({current}/{total}): {}", f.rel_path),
+                    },
+                );
+            }
         }
         if f.error.is_some() {
             errors += 1;
@@ -1340,29 +1408,29 @@ fn start_verify_controlled(
             let job_id_for_cb = job_id.clone();
             let app_for_cb = app.clone();
             let cancel_for_cb = cancel.clone();
-            let mut stop = false;
+            let mut gate = job::ProgressGate::new();
             let result = vault::verify_controlled(
                 &root,
                 &mode,
                 filter,
                 Some(&mut |cur, total, path| {
-                    if job::is_cancelled(&cancel_for_cb) {
-                        stop = true;
+                    let cancelled = job::is_cancelled(&cancel_for_cb);
+                    if gate.due(cancelled || cur == total) {
+                        let _ = app_for_cb.emit(
+                            "verify-job-progress",
+                            GenericProgress {
+                                job_id: job_id_for_cb.clone(),
+                                phase: "verifying".into(),
+                                current: cur,
+                                total,
+                                rel_path: Some(path.to_string()),
+                                message: format!("正在校验 ({cur}/{total}): {path}"),
+                            },
+                        );
                     }
-                    let _ = app_for_cb.emit(
-                        "verify-job-progress",
-                        GenericProgress {
-                            job_id: job_id_for_cb.clone(),
-                            phase: "verifying".into(),
-                            current: cur,
-                            total,
-                            rel_path: Some(path.to_string()),
-                            message: format!("正在校验 ({cur}/{total}): {path}"),
-                        },
-                    );
+                    !cancelled
                 }),
             );
-            let _ = stop;
             match result {
                 Ok(report) => {
                     let cancelled = job::is_cancelled(&cancel);
@@ -1566,9 +1634,9 @@ fn count_files_under(dir: &Path, my_id: u64) -> Option<u64> {
             if name.eq_ignore_ascii_case(disk::META_DIR) {
                 continue;
             }
-            let ep = ent.path();
-            if ep.is_dir() {
-                stack.push(ep);
+            let is_dir = ent.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
+            if is_dir {
+                stack.push(ent.path());
             } else {
                 n += 1;
             }
@@ -1577,20 +1645,37 @@ fn count_files_under(dir: &Path, my_id: u64) -> Option<u64> {
     Some(n)
 }
 
-fn controlled_files_under(root: &Path, dir: &Path) -> u64 {
-    let Ok(rel) = vault::normalize_rel_path(root, dir) else {
-        return 0;
-    };
-    let rel_l = rel.to_lowercase();
-    let prefix = format!("{rel_l}\\");
-    let files = vault::list_controlled_files(root).unwrap_or_default();
-    files
-        .iter()
-        .filter(|f| {
-            let c = f.rel_path.to_lowercase();
-            c == rel_l || c.starts_with(&prefix)
-        })
-        .count() as u64
+fn controlled_count_for(index: &vault::ControlledPathIndex, root: &Path, dir: &Path) -> u64 {
+    let root_s = root
+        .to_string_lossy()
+        .trim_end_matches(['\\', '/'])
+        .replace('/', "\\");
+    let dir_s = dir
+        .to_string_lossy()
+        .trim_end_matches(['\\', '/'])
+        .replace('/', "\\");
+    if dir_s.eq_ignore_ascii_case(&root_s) {
+        return index.len();
+    }
+    match vault::normalize_rel_path(root, dir) {
+        Ok(rel) => index.count_under(&rel.to_lowercase()),
+        Err(_) => 0,
+    }
+}
+
+fn ensure_index<'a>(
+    root: &Path,
+    cache: &'a mut std::collections::HashMap<String, vault::ControlledPathIndex>,
+) -> Option<&'a vault::ControlledPathIndex> {
+    if !disk::is_backup_disk(root) {
+        return None;
+    }
+    let key = root.to_string_lossy().to_string();
+    if !cache.contains_key(&key) {
+        let rels = vault::list_controlled_rel_paths(root).unwrap_or_default();
+        cache.insert(key.clone(), vault::ControlledPathIndex::from_paths(rels));
+    }
+    cache.get(&key)
 }
 
 /// Start async counts for controlled directories. At most one job; newer call cancels previous.
@@ -1607,6 +1692,7 @@ fn start_dir_file_counts(app: tauri::AppHandle, paths: Vec<String>) -> Result<u6
     std::thread::Builder::new()
         .name("datavault-dir-counts".into())
         .spawn(move || {
+            let mut index_cache = std::collections::HashMap::new();
             for path in paths {
                 if DIR_COUNTS_JOB.load(Ordering::SeqCst) != job_id {
                     let _ = app.emit(
@@ -1625,8 +1711,8 @@ fn start_dir_file_counts(app: tauri::AppHandle, paths: Vec<String>) -> Result<u6
                     continue;
                 }
                 let controlled = if let Some(root) = disk::drive_root_of(&p) {
-                    if disk::is_backup_disk(&root) {
-                        controlled_files_under(&root, &p)
+                    if let Some(index) = ensure_index(&root, &mut index_cache) {
+                        controlled_count_for(index, &root, &p)
                     } else {
                         0
                     }
@@ -1717,6 +1803,41 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod copy_tests {
+    use super::{compute_md5_quick_legacy, copy_with_legacy_quick};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn check(len: usize) {
+        let dir = std::env::temp_dir().join(format!(
+            "dv-copy-{}-{}",
+            len,
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("s.bin");
+        let dest = dir.join("d.bin");
+        let data: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&src, &data).unwrap();
+        let (n, quick) = copy_with_legacy_quick(&src, &dest).unwrap();
+        assert_eq!(n, len as u64);
+        assert_eq!(std::fs::read(&dest).unwrap(), data);
+        assert_eq!(quick, compute_md5_quick_legacy(&src).unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn quick_hash_matches_legacy_while_copying() {
+        check(0);
+        check(100);
+        check(70_000);
+        check(200_000);
+    }
 }
 
 #[cfg(test)]

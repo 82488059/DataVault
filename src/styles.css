@@ -55,3 +55,25 @@ html::-webkit-scrollbar-track, body::-webkit-scrollbar-track { background: trans
 .scroll-thin::-webkit-scrollbar-thumb:hover {
   background: #4a5a73;
 }
+
+/* Lists longer than the windowing threshold use a fixed row pitch. */
+.table-wrap.windowed table { table-layout: fixed; width: 100%; }
+.table-wrap.windowed .name,
+.table-wrap.windowed td.mono {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.result-list.windowed li:not(.vpad) {
+  height: 52px;
+  overflow: hidden;
+  margin-bottom: 0;
+  box-sizing: border-box;
+}
+.result-list li.vpad,
+tr.vpad {
+  border: none;
+  background: transparent;
+  padding: 0;
+  margin: 0;
+}

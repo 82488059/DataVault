@@ -112,6 +112,30 @@ fn emit_progress(app: &AppHandle, p: JobProgress) {
     let _ = app.emit(EVT_PROGRESS, p);
 }
 
+/// Drops progress events closer than 200 ms apart. `force` always emits (last file, errors).
+pub struct ProgressGate {
+    last: std::time::Instant,
+    every: std::time::Duration,
+}
+
+impl ProgressGate {
+    pub fn new() -> Self {
+        Self {
+            last: std::time::Instant::now() - std::time::Duration::from_secs(1),
+            every: std::time::Duration::from_millis(200),
+        }
+    }
+
+    pub fn due(&mut self, force: bool) -> bool {
+        if force || self.last.elapsed() >= self.every {
+            self.last = std::time::Instant::now();
+            true
+        } else {
+            false
+        }
+    }
+}
+
 fn emit_finished(app: &AppHandle, f: JobFinished) {
     let _ = app.emit(EVT_FINISHED, f);
 }
@@ -147,6 +171,33 @@ fn run_hash_job(
     let mut out_files: Vec<ControlledFile> = Vec::new();
     let mut cancelled = false;
 
+    let mut session = if to_hash.is_empty() {
+        None
+    } else {
+        match vault::IndexSession::open(drive_root) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                emit_finished(
+                    app,
+                    JobFinished {
+                        job_id: job_id.to_string(),
+                        kind: kind.to_string(),
+                        ok: false,
+                        cancelled: false,
+                        added: 0,
+                        skipped,
+                        failed: 0,
+                        total,
+                        message: e,
+                        files: vec![],
+                    },
+                );
+                finish_job(job_id);
+                return;
+            }
+        }
+    };
+
     emit_progress(
         app,
         JobProgress {
@@ -159,6 +210,7 @@ fn run_hash_job(
         },
     );
 
+    let mut gate = ProgressGate::new();
     for (i, abs) in to_hash.iter().enumerate() {
         if is_cancelled(cancel) {
             cancelled = true;
@@ -166,19 +218,25 @@ fn run_hash_job(
         }
         let rel_display = vault::normalize_rel_path(drive_root, abs)
             .unwrap_or_else(|_| abs.to_string_lossy().to_string());
-        emit_progress(
-            app,
-            JobProgress {
-                job_id: job_id.to_string(),
-                phase: "hashing".into(),
-                current: i + 1,
-                total,
-                rel_path: Some(rel_display.clone()),
-                message: format!("正在处理 ({}/{total}): {rel_display}", i + 1),
-            },
-        );
+        let current = i + 1;
+        if gate.due(current == total) {
+            emit_progress(
+                app,
+                JobProgress {
+                    job_id: job_id.to_string(),
+                    phase: "hashing".into(),
+                    current,
+                    total,
+                    rel_path: Some(rel_display.clone()),
+                    message: format!("正在处理 ({current}/{total}): {rel_display}"),
+                },
+            );
+        }
 
-        match vault::upsert_controlled_file(
+        let Some(session) = session.as_mut() else {
+            break;
+        };
+        match session.upsert_file(
             drive_root,
             abs,
             crate::hashutil::DEFAULT_SAMPLE_RATIO,
@@ -202,6 +260,28 @@ fn run_hash_job(
                     },
                 );
             }
+        }
+    }
+
+    if let Some(session) = session {
+        if let Err(e) = session.commit() {
+            emit_finished(
+                app,
+                JobFinished {
+                    job_id: job_id.to_string(),
+                    kind: kind.to_string(),
+                    ok: false,
+                    cancelled,
+                    added,
+                    skipped,
+                    failed,
+                    total,
+                    message: format!("写入索引失败: {e}"),
+                    files: vec![],
+                },
+            );
+            finish_job(job_id);
+            return;
         }
     }
 
@@ -382,5 +462,18 @@ pub fn is_running() -> bool {
         g.values().any(|s| s.kind == "add" || s.kind == "index")
     } else {
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProgressGate;
+
+    #[test]
+    fn progress_gate_throttles_until_forced() {
+        let mut gate = ProgressGate::new();
+        assert!(gate.due(false));
+        assert!(!gate.due(false));
+        assert!(gate.due(true));
     }
 }

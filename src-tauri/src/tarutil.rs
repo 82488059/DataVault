@@ -2,7 +2,6 @@
 
 use serde::{Deserialize, Serialize};
 use std::fs::File;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -157,11 +156,8 @@ pub fn pack_files(
             .map_err(|e| format!("设置 tar 路径失败: {e}"))?;
         header.set_size(meta.len());
         header.set_cksum();
-        let mut buf = Vec::new();
-        f.read_to_end(&mut buf)
-            .map_err(|e| format!("读取源文件失败 {}: {e}", abs.display()))?;
         builder
-            .append_data(&mut header, &rel_s, buf.as_slice())
+            .append_data(&mut header, &rel_s, &mut f)
             .map_err(|e| format!("写入 tar 失败 {rel_s}: {e}"))?;
     }
     builder
@@ -175,4 +171,43 @@ pub fn pack_files(
 pub fn name_matches(file_name: &str, re: &regex::Regex, exclude: bool) -> bool {
     let m = re.is_match(file_name);
     if exclude { !m } else { m }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Read;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn pack_streams_file_bytes() {
+        let dir = std::env::temp_dir().join(format!(
+            "dv-tar-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("hello.txt");
+        std::fs::write(&src, b"hello-tar-stream").unwrap();
+        let tar_path = dir.join("out.tar");
+        let rel = PathBuf::from("sub").join("hello.txt");
+        let n = pack_files(&tar_path, &[(src, rel)], |_, _| {}).unwrap();
+        assert!(n > 0);
+        let mut archive = tar::Archive::new(File::open(&tar_path).unwrap());
+        let mut found = false;
+        for ent in archive.entries().unwrap() {
+            let mut ent = ent.unwrap();
+            let path = ent.path().unwrap().to_string_lossy().replace('\\', "/");
+            if path == "sub/hello.txt" {
+                let mut body = Vec::new();
+                ent.read_to_end(&mut body).unwrap();
+                assert_eq!(body, b"hello-tar-stream");
+                found = true;
+            }
+        }
+        assert!(found);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

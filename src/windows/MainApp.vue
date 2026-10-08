@@ -3,6 +3,7 @@ import { computed, onMounted, onUnmounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { openAdvancedVerifyWindow, openAdvancedBackupWindow } from "../bridge";
+import { useVirtualList } from "../virtualList";
 
 interface DirEntryInfo {
   name: string; path: string; is_dir: boolean; size: number;
@@ -184,6 +185,18 @@ const filteredBatchItems = computed(() => {
   if (!f) return items;
   return items.filter((it) => it.status === f);
 });
+const {
+  windowed: entriesWindowed, range: entryRange, slice: shownEntries,
+  onScroll: onEntryScroll, setScroller: setEntryScroller,
+} = useVirtualList(entries, 36, 200, currentPath);
+const {
+  windowed: controlledWindowed, range: controlledRange, slice: shownControlled,
+  onScroll: onControlledScroll, setScroller: setControlledScroller,
+} = useVirtualList(filteredControlledItems, 52, 200, controlledStatusFilter);
+const {
+  windowed: batchWindowed, range: batchRange, slice: shownBatch,
+  onScroll: onBatchScroll, setScroller: setBatchScroller,
+} = useVirtualList(filteredBatchItems, 52, 200, batchStatusFilter);
 
 function toggleControlledStatusFilter(status: VerifyStatusFilter) {
   controlledStatusFilter.value = controlledStatusFilter.value === status ? null : status;
@@ -704,7 +717,7 @@ onUnmounted(() => { for (const u of unlisteners) u(); unlisteners = []; });
           <code class="path-copy" tabindex="0" @click="copyCurrentPath" @keydown.enter.prevent="copyCurrentPath">{{ pathLabel }}</code>
           <button class="btn small" type="button" title="复制路径" @click="copyCurrentPath">复制</button>
         </div>
-        <div class="table-wrap">
+        <div class="table-wrap" :class="{ windowed: entriesWindowed }" :ref="setEntryScroller" @scroll="onEntryScroll">
           <table>
             <thead>
               <tr>
@@ -713,7 +726,8 @@ onUnmounted(() => { for (const u of unlisteners) u(); unlisteners = []; });
               </tr>
             </thead>
             <tbody>
-              <tr v-for="e in entries" :key="e.path" :class="{ selected: selected.has(e.path) }" @dblclick="openEntry(e)">
+              <tr v-if="entryRange.padTop" class="vpad" aria-hidden="true"><td colspan="5" :style="{ height: entryRange.padTop + 'px', padding: 0, border: 'none' }"></td></tr>
+              <tr v-for="e in shownEntries" :key="e.path" :class="{ selected: selected.has(e.path) }" @dblclick="openEntry(e)">
                 <td><input type="checkbox" :checked="selected.has(e.path)" @change="toggleSelect(e.path)" /></td>
                 <td class="name" @click="(e.is_dir || isControlledTar(e)) ? openEntry(e) : toggleSelect(e.path)">
                   <span class="icon" aria-hidden="true">{{ e.is_dir || isDriveRootPath(e.path) ? "📁" : "📄" }}</span>{{ e.name }}
@@ -726,6 +740,7 @@ onUnmounted(() => { for (const u of unlisteners) u(); unlisteners = []; });
                   <span v-if="e.is_dir && e.is_controlled" title="受控文件数/总文件数">{{ e.controlled_count != null && e.total_files != null ? e.controlled_count + '/' + e.total_files : '…' }}</span>
                 </td>
               </tr>
+              <tr v-if="entryRange.padBottom" class="vpad" aria-hidden="true"><td colspan="5" :style="{ height: entryRange.padBottom + 'px', padding: 0, border: 'none' }"></td></tr>
               <tr v-if="!entries.length"><td colspan="5" class="muted center">空目录或无法访问</td></tr>
             </tbody>
           </table>
@@ -829,13 +844,15 @@ onUnmounted(() => { for (const u of unlisteners) u(); unlisteners = []; });
                 <button type="button" class="stat-filter miss" :class="{ active: controlledStatusFilter === 'missing' }" title="筛选：缺失（再点取消）" @click="toggleControlledStatusFilter('missing')">缺失 <strong>{{ expandedFinished.controlled.missing }}</strong></button>
                 <button type="button" class="stat-filter err" :class="{ active: controlledStatusFilter === 'error' }" title="筛选：错误（再点取消）" @click="toggleControlledStatusFilter('error')">错误 <strong>{{ expandedFinished.controlled.errors }}</strong></button>
               </p>
-              <ul class="result-list">
-                <li v-for="(it, i) in filteredControlledItems" :key="'c-'+i" :class="{ ok: it.status === 'pass', bad: it.status !== 'pass' }">
+              <ul class="result-list" :class="{ windowed: controlledWindowed }" :ref="setControlledScroller" @scroll="onControlledScroll">
+                <li v-if="controlledRange.padTop" class="vpad" aria-hidden="true" :style="{ height: controlledRange.padTop + 'px' }"></li>
+                <li v-for="(it, i) in shownControlled" :key="'c-'+controlledRange.start+'-'+i" :class="{ ok: it.status === 'pass', bad: it.status !== 'pass' }">
                   <div class="rel">{{ it.rel_path }}</div>
                   <div class="msg">{{ it.status }} — {{ it.message }}</div>
                   <div v-if="it.expected" class="hash">期望 {{ it.expected }}</div>
                   <div v-if="it.actual" class="hash">实际 {{ it.actual }}</div>
                 </li>
+                <li v-if="controlledRange.padBottom" class="vpad" aria-hidden="true" :style="{ height: controlledRange.padBottom + 'px' }"></li>
               </ul>
             </div>
             <div v-if="expandedFinished && expandedFinished.job_id === j.job_id && expandedFinished.batch" class="verify-summary">
@@ -845,13 +862,15 @@ onUnmounted(() => { for (const u of unlisteners) u(); unlisteners = []; });
                 <button type="button" class="stat-filter miss" :class="{ active: batchStatusFilter === 'missing' }" title="筛选：缺失（再点取消）" @click="toggleBatchStatusFilter('missing')">缺失 <strong>{{ expandedFinished.batch.missing }}</strong></button>
                 <button type="button" class="stat-filter err" :class="{ active: batchStatusFilter === 'error' }" title="筛选：错误（再点取消）" @click="toggleBatchStatusFilter('error')">错误 <strong>{{ expandedFinished.batch.errors }}</strong></button>
               </p>
-              <ul class="result-list">
-                <li v-for="(it, i) in filteredBatchItems" :key="'b-'+i" :class="{ ok: it.status === 'pass', bad: it.status !== 'pass' }">
+              <ul class="result-list" :class="{ windowed: batchWindowed }" :ref="setBatchScroller" @scroll="onBatchScroll">
+                <li v-if="batchRange.padTop" class="vpad" aria-hidden="true" :style="{ height: batchRange.padTop + 'px' }"></li>
+                <li v-for="(it, i) in shownBatch" :key="'b-'+batchRange.start+'-'+i" :class="{ ok: it.status === 'pass', bad: it.status !== 'pass' }">
                   <div class="rel">{{ it.rel_path }}</div>
                   <div class="msg">{{ statusLabel(it.status) }} · {{ it.message }}</div>
                   <div v-if="it.src_hash" class="hash">源 {{ it.src_hash }}</div>
                   <div v-if="it.dest_hash" class="hash">目标 {{ it.dest_hash }}</div>
                 </li>
+                <li v-if="batchRange.padBottom" class="vpad" aria-hidden="true" :style="{ height: batchRange.padBottom + 'px' }"></li>
               </ul>
             </div>
           </template>

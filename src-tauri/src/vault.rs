@@ -1,9 +1,7 @@
 //! SQLite vault.db — controlled_files table on the backup disk.
 
 use crate::disk::{self, shanghai_now_iso};
-use crate::hashutil::{
-    compute_fast_md5, compute_md5_full, DEFAULT_SAMPLE_CHUNK_MB, DEFAULT_SAMPLE_RATIO,
-};
+use crate::hashutil::{compute_fast_md5, compute_md5_full, DEFAULT_SAMPLE_CHUNK_MB, DEFAULT_SAMPLE_RATIO};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -44,33 +42,127 @@ pub struct ControlledVerifyReport {
     pub errors: usize,
 }
 
-pub fn ensure_db(drive_root: &Path) -> Result<(), String> {
+const SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS controlled_files (
+  rel_path TEXT PRIMARY KEY,
+  size INTEGER NOT NULL,
+  mtime INTEGER NOT NULL,
+  md5 TEXT NOT NULL,
+  fast_md5 TEXT NOT NULL,
+  sample_ratio REAL NOT NULL DEFAULT 0.10,
+  sample_chunk_mb INTEGER NOT NULL DEFAULT 100,
+  updated_at TEXT NOT NULL
+);
+"#;
+
+fn open_conn(drive_root: &Path) -> Result<Connection, String> {
     let meta = disk::meta_dir(drive_root);
     fs::create_dir_all(&meta).map_err(|e| format!("创建 .datavault 失败: {e}"))?;
-    let db_path = disk::vault_db_path(drive_root);
-    let conn = Connection::open(&db_path).map_err(|e| format!("打开 vault.db 失败: {e}"))?;
-    conn.execute_batch(
-        r#"
-        CREATE TABLE IF NOT EXISTS controlled_files (
-          rel_path TEXT PRIMARY KEY,
-          size INTEGER NOT NULL,
-          mtime INTEGER NOT NULL,
-          md5 TEXT NOT NULL,
-          fast_md5 TEXT NOT NULL,
-          sample_ratio REAL NOT NULL DEFAULT 0.10,
-          sample_chunk_mb INTEGER NOT NULL DEFAULT 100,
-          updated_at TEXT NOT NULL
-        );
-        "#,
-    )
-    .map_err(|e| format!("建表失败: {e}"))?;
-    Ok(())
+    let conn = Connection::open(disk::vault_db_path(drive_root))
+        .map_err(|e| format!("打开 vault.db 失败: {e}"))?;
+    conn.execute_batch(SCHEMA)
+        .map_err(|e| format!("建表失败: {e}"))?;
+    Ok(conn)
+}
+
+pub fn ensure_db(drive_root: &Path) -> Result<(), String> {
+    open_conn(drive_root).map(|_| ())
 }
 
 fn open_db(drive_root: &Path) -> Result<Connection, String> {
-    ensure_db(drive_root)?;
-    let db_path = disk::vault_db_path(drive_root);
-    Connection::open(db_path).map_err(|e| format!("打开 vault.db 失败: {e}"))
+    open_conn(drive_root)
+}
+
+const UPSERT_SQL: &str = r#"
+INSERT INTO controlled_files
+  (rel_path, size, mtime, md5, fast_md5, sample_ratio, sample_chunk_mb, updated_at)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+ON CONFLICT(rel_path) DO UPDATE SET
+  size=excluded.size,
+  mtime=excluded.mtime,
+  md5=excluded.md5,
+  fast_md5=excluded.fast_md5,
+  sample_ratio=excluded.sample_ratio,
+  sample_chunk_mb=excluded.sample_chunk_mb,
+  updated_at=excluded.updated_at
+"#;
+
+fn insert_row(
+    conn: &Connection,
+    rel_path: &str,
+    size: i64,
+    mtime: i64,
+    md5: &str,
+    fast_md5: &str,
+    sample_ratio: f64,
+    sample_chunk_mb: i64,
+    updated_at: &str,
+) -> Result<(), String> {
+    conn.execute(
+        UPSERT_SQL,
+        params![
+            rel_path,
+            size,
+            mtime,
+            md5,
+            fast_md5,
+            sample_ratio,
+            sample_chunk_mb,
+            updated_at
+        ],
+    )
+    .map_err(|e| format!("写入 controlled_files 失败: {e}"))?;
+    Ok(())
+}
+
+/// One connection and one transaction for a whole index run.
+/// Drop without [`IndexSession::commit`] rolls the batch back.
+pub struct IndexSession {
+    conn: Connection,
+    buf: Vec<u8>,
+}
+
+impl IndexSession {
+    pub fn open(drive_root: &Path) -> Result<Self, String> {
+        let conn = open_conn(drive_root)?;
+        conn.execute_batch("BEGIN")
+            .map_err(|e| format!("开始事务失败: {e}"))?;
+        Ok(Self {
+            conn,
+            buf: vec![0u8; crate::hashutil::READ_BUF_SIZE],
+        })
+    }
+
+    pub fn upsert_file(
+        &mut self,
+        drive_root: &Path,
+        abs_path: &Path,
+        sample_ratio: f64,
+        sample_chunk_mb: i64,
+    ) -> Result<ControlledFile, String> {
+        let (row, pair_md5, pair_fast) =
+            hashed_row(drive_root, abs_path, sample_ratio, sample_chunk_mb, &mut self.buf)?;
+        let updated_at = row.updated_at.clone();
+        insert_row(
+            &self.conn,
+            &row.rel_path,
+            row.size,
+            row.mtime,
+            &pair_md5,
+            &pair_fast,
+            sample_ratio,
+            sample_chunk_mb,
+            &updated_at,
+        )?;
+        Ok(row)
+    }
+
+    pub fn commit(self) -> Result<(), String> {
+        self.conn
+            .execute_batch("COMMIT")
+            .map_err(|e| format!("提交事务失败: {e}"))?;
+        Ok(())
+    }
 }
 
 /// Normalize path relative to drive root:
@@ -135,9 +227,41 @@ fn file_mtime_secs(meta: &fs::Metadata) -> i64 {
         .unwrap_or(0)
 }
 
-pub fn upsert_controlled_file(
+fn hashed_row(
     drive_root: &Path,
     abs_path: &Path,
+    sample_ratio: f64,
+    sample_chunk_mb: i64,
+    buf: &mut Vec<u8>,
+) -> Result<(ControlledFile, String, String), String> {
+    if !abs_path.is_file() {
+        return Err(format!("不是文件: {}", abs_path.display()));
+    }
+    let rel_path = normalize_rel_path(drive_root, abs_path)?;
+    let meta = fs::metadata(abs_path).map_err(|e| format!("元数据失败: {e}"))?;
+    let size = meta.len() as i64;
+    let mtime = file_mtime_secs(&meta);
+    let pair = crate::hashutil::compute_md5_pair_buf(abs_path, sample_ratio, sample_chunk_mb, buf)?;
+    let updated_at = shanghai_now_iso();
+    let row = ControlledFile {
+        rel_path,
+        size,
+        mtime,
+        md5: pair.md5.clone(),
+        fast_md5: pair.fast_md5.clone(),
+        sample_ratio,
+        sample_chunk_mb,
+        updated_at,
+    };
+    Ok((row, pair.md5, pair.fast_md5))
+}
+
+/// Insert hashes already computed for `abs_path`. Does not read the file again.
+pub fn upsert_prehashed(
+    drive_root: &Path,
+    abs_path: &Path,
+    md5: &str,
+    fast_md5: &str,
     sample_ratio: f64,
     sample_chunk_mb: i64,
 ) -> Result<ControlledFile, String> {
@@ -149,50 +273,30 @@ pub fn upsert_controlled_file(
     }
     let rel_path = normalize_rel_path(drive_root, abs_path)?;
     let meta = fs::metadata(abs_path).map_err(|e| format!("元数据失败: {e}"))?;
-    let size = meta.len() as i64;
-    let mtime = file_mtime_secs(&meta);
-    let md5 = compute_md5_full(abs_path)?;
-    let fast_md5 = compute_fast_md5(abs_path, sample_ratio, sample_chunk_mb)?;
     let updated_at = shanghai_now_iso();
-
+    let row = ControlledFile {
+        rel_path: rel_path.clone(),
+        size: meta.len() as i64,
+        mtime: file_mtime_secs(&meta),
+        md5: md5.to_string(),
+        fast_md5: fast_md5.to_string(),
+        sample_ratio,
+        sample_chunk_mb,
+        updated_at: updated_at.clone(),
+    };
     let conn = open_db(drive_root)?;
-    conn.execute(
-        r#"
-        INSERT INTO controlled_files
-          (rel_path, size, mtime, md5, fast_md5, sample_ratio, sample_chunk_mb, updated_at)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-        ON CONFLICT(rel_path) DO UPDATE SET
-          size=excluded.size,
-          mtime=excluded.mtime,
-          md5=excluded.md5,
-          fast_md5=excluded.fast_md5,
-          sample_ratio=excluded.sample_ratio,
-          sample_chunk_mb=excluded.sample_chunk_mb,
-          updated_at=excluded.updated_at
-        "#,
-        params![
-            rel_path,
-            size,
-            mtime,
-            md5,
-            fast_md5,
-            sample_ratio,
-            sample_chunk_mb,
-            updated_at
-        ],
-    )
-    .map_err(|e| format!("写入 controlled_files 失败: {e}"))?;
-
-    Ok(ControlledFile {
-        rel_path,
-        size,
-        mtime,
+    insert_row(
+        &conn,
+        &rel_path,
+        row.size,
+        row.mtime,
         md5,
         fast_md5,
         sample_ratio,
         sample_chunk_mb,
-        updated_at,
-    })
+        &updated_at,
+    )?;
+    Ok(row)
 }
 
 pub fn add_controlled_files(
@@ -204,8 +308,8 @@ pub fn add_controlled_files(
         .into_iter()
         .map(|f| f.rel_path.to_lowercase())
         .collect();
-    let mut out = Vec::new();
     let files = expand_paths_to_files(drive_root, paths)?;
+    let mut pending = Vec::new();
     for f in files {
         let rel = match normalize_rel_path(drive_root, &f) {
             Ok(r) => r,
@@ -214,12 +318,31 @@ pub fn add_controlled_files(
         if existing.contains(&rel.to_lowercase()) {
             continue; // already controlled — skip re-hash
         }
-        out.push(upsert_controlled_file(
+        pending.push(f);
+    }
+    if pending.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut session = IndexSession::open(drive_root)?;
+    let mut out = Vec::new();
+    let mut first_err = None;
+    for f in pending {
+        match session.upsert_file(
             drive_root,
             &f,
             DEFAULT_SAMPLE_RATIO,
             DEFAULT_SAMPLE_CHUNK_MB,
-        )?);
+        ) {
+            Ok(row) => out.push(row),
+            Err(e) => {
+                first_err = Some(e);
+                break;
+            }
+        }
+    }
+    session.commit()?;
+    if let Some(e) = first_err {
+        return Err(e);
     }
     Ok(out)
 }
@@ -302,11 +425,84 @@ pub fn list_controlled_files(drive_root: &Path) -> Result<Vec<ControlledFile>, S
     Ok(out)
 }
 
+/// Relative paths only, for directory badges and counts.
+pub fn list_controlled_rel_paths(drive_root: &Path) -> Result<Vec<String>, String> {
+    if !disk::is_backup_disk(drive_root) {
+        return Err("当前盘不是 DataVault 受控盘".into());
+    }
+    let conn = open_db(drive_root)?;
+    let mut stmt = conn
+        .prepare("SELECT rel_path FROM controlled_files")
+        .map_err(|e| format!("查询失败: {e}"))?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|e| format!("查询失败: {e}"))?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r.map_err(|e| format!("行读取失败: {e}"))?);
+    }
+    Ok(out)
+}
+
+/// Lowercased controlled paths. Files are an exact set; directories use a sorted prefix search.
+pub struct ControlledPathIndex {
+    exact: std::collections::HashSet<String>,
+    sorted: Vec<String>,
+}
+
+impl ControlledPathIndex {
+    pub fn from_paths<I: IntoIterator<Item = String>>(paths: I) -> Self {
+        let mut sorted: Vec<String> = paths
+            .into_iter()
+            .map(|s| s.replace('/', "\\").to_lowercase())
+            .collect();
+        sorted.sort();
+        let exact = sorted.iter().cloned().collect();
+        Self { exact, sorted }
+    }
+
+    pub fn len(&self) -> u64 {
+        self.sorted.len() as u64
+    }
+
+    pub fn contains_file(&self, rel_lower: &str) -> bool {
+        self.exact.contains(rel_lower)
+    }
+
+    /// True when some controlled file lives strictly under this directory.
+    pub fn dir_has_controlled(&self, rel_lower: &str) -> bool {
+        let prefix = format!("{rel_lower}\\");
+        has_prefix(&self.sorted, &prefix)
+    }
+
+    pub fn count_under(&self, rel_lower: &str) -> u64 {
+        let prefix = format!("{rel_lower}\\");
+        let mut n = 0u64;
+        if self.exact.contains(rel_lower) {
+            n += 1;
+        }
+        let start = self.sorted.partition_point(|c| c.as_str() < prefix.as_str());
+        for c in self.sorted[start..].iter() {
+            if c.starts_with(&prefix) {
+                n += 1;
+            } else {
+                break;
+            }
+        }
+        n
+    }
+}
+
+fn has_prefix(sorted: &[String], prefix: &str) -> bool {
+    let i = sorted.partition_point(|c| c.as_str() < prefix);
+    sorted.get(i).is_some_and(|c| c.starts_with(prefix))
+}
+
 pub fn verify_controlled(
     drive_root: &Path,
     mode: &str,
     rel_paths: Option<Vec<String>>,
-    mut on_progress: Option<&mut dyn FnMut(usize, usize, &str)>,
+    mut on_progress: Option<&mut dyn FnMut(usize, usize, &str) -> bool>,
 ) -> Result<ControlledVerifyReport, String> {
     if !disk::is_backup_disk(drive_root) {
         return Err("当前盘不是 DataVault 受控盘".into());
@@ -336,7 +532,9 @@ pub fn verify_controlled(
     let total = targets.len();
     for (i, row) in targets.into_iter().enumerate() {
         if let Some(cb) = on_progress.as_mut() {
-            cb(i + 1, total, &row.rel_path);
+            if !cb(i + 1, total, &row.rel_path) {
+                break;
+            }
         }
         let abs = drive_root.join(&row.rel_path);
         if !abs.exists() {
@@ -524,5 +722,103 @@ pub fn resolve_controlled_selection(
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::disk;
+    use crate::hashutil::compute_md5_pair;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_root() -> PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "dv-vault-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    #[test]
+    fn index_session_is_invisible_until_commit() {
+        let root = temp_root();
+        disk::mark_backup_disk(&root).unwrap();
+        let a = root.join("a.txt");
+        let b = root.join("b.txt");
+        fs::write(&a, b"alpha").unwrap();
+        fs::write(&b, b"bravo-bravo").unwrap();
+
+        {
+            let mut session = IndexSession::open(&root).unwrap();
+            session.upsert_file(&root, &a, 0.1, 100).unwrap();
+            let mid = list_controlled_files(&root).unwrap();
+            assert!(mid.is_empty(), "uncommitted rows must not be visible");
+            drop(session);
+        }
+        assert!(list_controlled_files(&root).unwrap().is_empty());
+
+        let mut session = IndexSession::open(&root).unwrap();
+        session.upsert_file(&root, &a, 0.1, 100).unwrap();
+        session.upsert_file(&root, &b, 0.1, 100).unwrap();
+        session.commit().unwrap();
+        let listed = list_controlled_files(&root).unwrap();
+        assert_eq!(listed.len(), 2);
+        let expect_a = compute_md5_pair(&a, 0.1, 100).unwrap();
+        let row_a = listed
+            .iter()
+            .find(|f| f.rel_path.eq_ignore_ascii_case("a.txt"))
+            .unwrap();
+        assert_eq!(row_a.md5, expect_a.md5);
+        assert_eq!(row_a.fast_md5, expect_a.fast_md5);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn path_index_prefix_does_not_match_sibling_names() {
+        let index = ControlledPathIndex::from_paths([
+            r"foo\bar.txt".into(),
+            r"foo\baz\n.txt".into(),
+            "foobar.txt".into(),
+            r"Other\A.TXT".into(),
+        ]);
+        assert!(index.contains_file(r"foo\bar.txt"));
+        assert!(!index.contains_file(r"foo\bar"));
+        assert!(index.dir_has_controlled("foo"));
+        assert!(index.dir_has_controlled(r"foo\baz"));
+        assert!(!index.dir_has_controlled("foobar"));
+        assert!(!index.dir_has_controlled("food"));
+        assert_eq!(index.count_under("foo"), 2);
+        assert_eq!(index.count_under(r"foo\baz"), 1);
+        assert_eq!(index.count_under("other"), 1);
+        assert_eq!(index.len(), 4);
+    }
+
+    #[test]
+    fn verify_stops_when_progress_returns_false() {
+        let root = temp_root();
+        disk::mark_backup_disk(&root).unwrap();
+        let a = root.join("a.txt");
+        let b = root.join("b.txt");
+        fs::write(&a, b"alpha").unwrap();
+        fs::write(&b, b"bravo").unwrap();
+        let mut session = IndexSession::open(&root).unwrap();
+        session.upsert_file(&root, &a, 0.1, 100).unwrap();
+        session.upsert_file(&root, &b, 0.1, 100).unwrap();
+        session.commit().unwrap();
+
+        let mut calls = 0usize;
+        let report = verify_controlled(&root, "quick", None, Some(&mut |_cur, _total, _path| {
+            calls += 1;
+            calls < 2
+        }))
+        .unwrap();
+        assert_eq!(calls, 2);
+        assert_eq!(report.items.len(), 1);
+        let _ = fs::remove_dir_all(&root);
+    }
 }
 
