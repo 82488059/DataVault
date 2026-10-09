@@ -425,6 +425,19 @@ pub fn list_controlled_files(drive_root: &Path) -> Result<Vec<ControlledFile>, S
     Ok(out)
 }
 
+/// True if `rel_path` is a controlled file (case-insensitive PK lookup).
+pub fn controlled_rel_path_exists(drive_root: &Path, rel_path: &str) -> Result<bool, String> {
+    if !disk::is_backup_disk(drive_root) {
+        return Ok(false);
+    }
+    let conn = open_db(drive_root)?;
+    let mut stmt = conn
+        .prepare("SELECT 1 FROM controlled_files WHERE rel_path = ?1 COLLATE NOCASE LIMIT 1")
+        .map_err(|e| format!("查询失败: {e}"))?;
+    stmt.exists(params![rel_path])
+        .map_err(|e| format!("查询失败: {e}"))
+}
+
 /// Relative paths only, for directory badges and counts.
 pub fn list_controlled_rel_paths(drive_root: &Path) -> Result<Vec<String>, String> {
     if !disk::is_backup_disk(drive_root) {

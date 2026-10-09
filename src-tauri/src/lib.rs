@@ -392,11 +392,7 @@ fn is_controlled_tar_file(path: &Path) -> bool {
     let Ok(rel) = vault::normalize_rel_path(&root, path) else {
         return false;
     };
-    let Ok(files) = vault::list_controlled_files(&root) else {
-        return false;
-    };
-    let rel_l = rel.to_lowercase();
-    files.iter().any(|f| f.rel_path.eq_ignore_ascii_case(&rel_l))
+    vault::controlled_rel_path_exists(&root, &rel).unwrap_or(false)
 }
 
 #[tauri::command]

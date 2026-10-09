@@ -5,7 +5,7 @@ use crate::vault::{self, ControlledFile};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use tauri::{AppHandle, Emitter};
 
@@ -18,6 +18,7 @@ struct JobSlot {
 }
 
 static JOBS: LazyLock<Mutex<HashMap<String, JobSlot>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static JOB_SEQ: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Serialize)]
 pub struct JobStart {
@@ -50,10 +51,13 @@ pub struct JobFinished {
     pub files: Vec<ControlledFile>,
 }
 
-/// Job id numeric part: local 年月日时分秒 (YYYYMMDDHHmmss), e.g. batch-20260928160700.
+/// Job id: `{kind}-YYYYMMDDHHmmssmmm-{seq}` — ms + monotonic seq avoid same-second collisions.
 fn new_job_id(prefix: &str) -> String {
-    let stamp = chrono::Local::now().format("%Y%m%d%H%M%S").to_string();
-    format!("{prefix}-{stamp}")
+    let now = chrono::Local::now();
+    let stamp = now.format("%Y%m%d%H%M%S").to_string();
+    let ms = now.timestamp_subsec_millis();
+    let seq = JOB_SEQ.fetch_add(1, Ordering::Relaxed);
+    format!("{prefix}-{stamp}{ms:03}-{seq}")
 }
 
 /// Register a new job; returns (job_id, cancel flag). Caller must `finish_job` when done.
