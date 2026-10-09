@@ -23,6 +23,8 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 tar = "0.4"
 regex = "1"
+sha2 = "0.10"
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [profile.release]
 codegen-units = 1

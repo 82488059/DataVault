@@ -1,8 +1,8 @@
 ﻿# `.datavault` 元数据备份 / 恢复设计（已批准）
 
-> 状态：**已批准**（用户确认）  
+> 状态：**已实现**（阶段 13）  
 > 日期：2026-10-09  
-> 范围：**仅设计文档**；本轮不改 Rust / Vue 业务代码  
+> 范围：设计 + Rust 命令 / 主窗口 Vue UI  
 > 相关：[备份盘受控文件设计](./2026-09-28-backup-disk-controlled-files-design.md)、盘根 `.datavault/`（`disk.json`、`vault.db`、批次元数据 JSON）
 
 ## 1. 背景

@@ -3,6 +3,7 @@ mod hashutil;
 mod job;
 mod vault;
 mod tarutil;
+mod metabackup;
 
 use md5::{Digest, Md5};
 use serde::{Deserialize, Serialize};
@@ -18,6 +19,7 @@ use hashutil::{compute_fast_md5, compute_md5_full, compute_md5_pair};
 use job::JobStart;
 use vault::{ControlledFile, ControlledVerifyReport};
 use tarutil::TarEntryInfo;
+use metabackup::{ExportResult, RestoreResult, VerifyReport as MetaVerifyReport};
 
 const SAMPLE_WINDOW: u64 = 64 * 1024;
 
@@ -1754,6 +1756,27 @@ fn start_dir_file_counts(app: tauri::AppHandle, paths: Vec<String>) -> Result<u6
 }
 
 
+
+#[tauri::command]
+fn default_datavault_export_name(drive: String) -> Result<String, String> {
+    metabackup::default_export_name(&drive)
+}
+
+#[tauri::command]
+fn export_datavault_metadata(drive: String, zip_path: String) -> Result<ExportResult, String> {
+    metabackup::export_datavault_metadata(&drive, &zip_path)
+}
+
+#[tauri::command]
+fn verify_datavault_backup_zip(zip_path: String) -> Result<MetaVerifyReport, String> {
+    metabackup::verify_datavault_backup_zip(&zip_path)
+}
+
+#[tauri::command]
+fn restore_datavault_metadata(drive: String, zip_path: String) -> Result<RestoreResult, String> {
+    metabackup::restore_datavault_metadata(&drive, &zip_path)
+}
+
 #[tauri::command]
 fn list_tar_entries(path: String, prefix: Option<String>) -> Result<Vec<TarEntryInfo>, String> {
     let p = PathBuf::from(&path);
@@ -1783,6 +1806,10 @@ pub fn run() {
             verify_controlled_quick,
             list_dir,
             list_tar_entries,
+            default_datavault_export_name,
+            export_datavault_metadata,
+            verify_datavault_backup_zip,
+            restore_datavault_metadata,
             start_dir_file_counts,
             md5_full,
             md5_quick,
