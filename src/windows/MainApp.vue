@@ -2,7 +2,7 @@
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { openAdvancedVerifyWindow, openAdvancedBackupWindow } from "../bridge";
+import { openAdvancedVerifyWindow, openAdvancedBackupWindow, openMetaBackupWindow } from "../bridge";
 import { useVirtualList } from "../virtualList";
 
 interface DirEntryInfo {
@@ -55,16 +55,6 @@ interface VerifyJobFinished {
 }
 interface JobStart { job_id: string; total: number; kind: string; }
 
-interface MetaExportResult {
-  zip_path: string; entry_count: number; source_drive: string;
-}
-interface MetaRestoreResult {
-  drive_root: string; backup_path: string | null; entry_count: number; message: string;
-}
-interface MetaVerifyReport {
-  ok: boolean; message: string; entry_count: number;
-  source_drive: string | null; exported_at: string | null; failures: string[];
-}
 
 
 interface ActiveJob {
@@ -154,11 +144,6 @@ function pushFinished(partial: Omit<FinishedTask, "label"> & { label?: string })
 
 const destPath = ref("");
 
-const metaExportName = ref("");
-const metaExportDir = ref("");
-const metaZipPath = ref("");
-const metaBusy = ref(false);
-const metaVerifySummary = ref("");
 
 const batchName = ref("");
 const sources = ref<string[]>([]);
@@ -334,125 +319,6 @@ function resolveSelectedDriveRoot(): string {
 const canIndex = computed(() => selected.value.size > 0 && (!!resolveBackupDrive() || !!resolveSelectedDriveRoot()));
 /** Enable quick/full verify when browsing a backup disk or when a backup drive letter is checked. */
 const canVerifyControlled = computed(() => !!resolveBackupDrive());
-
-const canExportMeta = computed(() => !!resolveBackupDrive());
-const canRestoreMeta = computed(() => !!resolveBackupDrive() || !!resolveSelectedDriveRoot());
-
-function metaDefaultDir(): string {
-  // Prefer current path's parent or user profile Downloads-like: use current drive root if browsing
-  const d = resolveBackupDrive() || resolveSelectedDriveRoot() || currentDrive.value;
-  if (d) return d.replace(/\\+$/, "") + "\\";
-  return "";
-}
-
-function buildExportZipPath(): string {
-  const name = (metaExportName.value || "").trim() || "DataVault-meta.zip";
-  const n = name.toLowerCase().endsWith(".zip") ? name : name + ".zip";
-  let dir = (metaExportDir.value || "").trim();
-  if (!dir) dir = metaDefaultDir();
-  if (!dir) return n;
-  const sep = dir.endsWith("\\") || dir.endsWith("/") ? "" : "\\";
-  return dir + sep + n;
-}
-
-async function refreshMetaExportName() {
-  const drive = resolveBackupDrive();
-  if (!drive) { metaExportName.value = ""; return; }
-  try {
-    metaExportName.value = await invoke<string>("default_datavault_export_name", { drive });
-    if (!metaExportDir.value) metaExportDir.value = metaDefaultDir();
-  } catch (e) {
-    const letter = drive.replace(/:\\?$/, "").replace(/\\/g, "");
-    const stamp = new Date().toISOString().replace(/[-:TZ.]/g, "").slice(0, 14);
-    metaExportName.value = `DataVault-meta-${letter}-${stamp}.zip`;
-  }
-}
-
-async function doExportMeta() {
-  errorMsg.value = ""; statusMsg.value = ""; metaVerifySummary.value = "";
-  const drive = resolveBackupDrive();
-  if (!drive) { errorMsg.value = "请先进入已标记的受控盘，或在盘符列表勾选一个受控盘"; return; }
-  if (!metaExportName.value.trim()) await refreshMetaExportName();
-  const zipPath = buildExportZipPath();
-  if (!zipPath.toLowerCase().endsWith(".zip")) { errorMsg.value = "导出文件名须以 .zip 结尾"; return; }
-  metaBusy.value = true;
-  statusMsg.value = "正在导出元数据…";
-  const jobId = "meta-export-" + Date.now();
-  upsertJob({ job_id: jobId, kind: "meta-export", phase: "running", message: "导出 .datavault → zip" });
-  try {
-    const res = await invoke<MetaExportResult>("export_datavault_metadata", { drive, zipPath });
-    statusMsg.value = `已导出：${res.zip_path}（${res.entry_count} 个文件）`;
-    removeJob(jobId);
-    pushFinished({ job_id: jobId, kind: "meta-export", ok: true, cancelled: false, message: statusMsg.value, controlled: null, batch: null });
-  } catch (e) {
-    errorMsg.value = String(e);
-    statusMsg.value = "";
-    removeJob(jobId);
-    pushFinished({ job_id: jobId, kind: "meta-export", ok: false, cancelled: false, message: String(e), controlled: null, batch: null });
-  } finally {
-    metaBusy.value = false;
-  }
-}
-
-async function doVerifyMetaZip() {
-  errorMsg.value = ""; statusMsg.value = ""; metaVerifySummary.value = "";
-  const zipPath = metaZipPath.value.trim();
-  if (!zipPath) { errorMsg.value = "请填写要校验的 zip 路径"; return; }
-  metaBusy.value = true;
-  statusMsg.value = "正在校验元数据备份…";
-  const jobId = "meta-verify-" + Date.now();
-  upsertJob({ job_id: jobId, kind: "meta-verify", phase: "verifying", message: zipPath });
-  try {
-    const res = await invoke<MetaVerifyReport>("verify_datavault_backup_zip", { zipPath });
-    metaVerifySummary.value = res.ok
-      ? res.message
-      : (res.message + (res.failures?.length ? "\n" + res.failures.slice(0, 8).join("\n") : ""));
-    statusMsg.value = res.message;
-    removeJob(jobId);
-    pushFinished({ job_id: jobId, kind: "meta-verify", ok: res.ok, cancelled: false, message: metaVerifySummary.value, controlled: null, batch: null });
-    if (!res.ok) errorMsg.value = res.message;
-  } catch (e) {
-    errorMsg.value = String(e);
-    statusMsg.value = "";
-    removeJob(jobId);
-    pushFinished({ job_id: jobId, kind: "meta-verify", ok: false, cancelled: false, message: String(e), controlled: null, batch: null });
-  } finally {
-    metaBusy.value = false;
-  }
-}
-
-async function doRestoreMeta() {
-  errorMsg.value = ""; statusMsg.value = "";
-  const drive = resolveBackupDrive() || resolveSelectedDriveRoot();
-  if (!drive) { errorMsg.value = "请先进入目标盘符根，或在盘符列表勾选一个盘符"; return; }
-  const zipPath = metaZipPath.value.trim();
-  if (!zipPath) { errorMsg.value = "请填写要恢复的 zip 路径"; return; }
-  const ok = window.confirm(
-    `确认从 zip 恢复元数据到「${drive}」？\n\n将覆盖该盘根 .datavault/；若已存在会先自动备份为 .datavault.bak-<时间戳>/。\n\n导出的是清单与标记，不是盘上用户数据文件的拷贝。`
-  );
-  if (!ok) { statusMsg.value = "已取消恢复"; return; }
-  metaBusy.value = true;
-  statusMsg.value = "正在校验并恢复元数据…";
-  const jobId = "meta-restore-" + Date.now();
-  upsertJob({ job_id: jobId, kind: "meta-restore", phase: "running", message: zipPath });
-  try {
-    const res = await invoke<MetaRestoreResult>("restore_datavault_metadata", { drive, zipPath });
-    statusMsg.value = res.message;
-    removeJob(jobId);
-    pushFinished({ job_id: jobId, kind: "meta-restore", ok: true, cancelled: false, message: res.message, controlled: null, batch: null });
-    await refreshBackupDrives();
-    if (currentPath.value) await loadDir(currentPath.value);
-    else await loadDir("");
-  } catch (e) {
-    errorMsg.value = String(e);
-    statusMsg.value = "";
-    removeJob(jobId);
-    pushFinished({ job_id: jobId, kind: "meta-restore", ok: false, cancelled: false, message: String(e), controlled: null, batch: null });
-  } finally {
-    metaBusy.value = false;
-  }
-}
-
 
 function formatSize(n: number | null | undefined): string {
   if (n == null || typeof n !== "number" || !Number.isFinite(n) || n < 0) return "-";
@@ -731,6 +597,11 @@ async function openAdvancedBackup() {
   try { await openAdvancedBackupWindow(); }
   catch (e) { errorMsg.value = String(e); }
 }
+async function openMetaBackup() {
+  errorMsg.value = "";
+  try { await openMetaBackupWindow(); }
+  catch (e) { errorMsg.value = String(e); }
+}
 async function doVerifyBatch(mode: "full" | "quick") {
   errorMsg.value = ""; statusMsg.value = "";
   if (!verifyBatchId.value) { errorMsg.value = "请选择要校验的批次"; return; }
@@ -944,30 +815,15 @@ onUnmounted(() => { for (const u of unlisteners) u(); unlisteners = []; });
             :disabled="!canIndex" @click="doIndex">建立备份索引</button>
         </section>
       
+
         <section class="panel">
           <div class="panel-head">
             <h2>元数据备份</h2>
+            <button type="button" class="btn small primary-outline panel-head-action" title="打开独立窗口：先选盘符，再导出/校验/恢复 .datavault（另存为 / 打开文件）" @click="openMetaBackup">打开窗口</button>
           </div>
-          <p class="muted small" title="导出的是 .datavault 清单与标记，不是盘上用户数据文件的拷贝">导出/恢复盘根 .datavault（disk.json、vault.db 等）为单个 zip；恢复前用 manifest 校验文件名+大小+哈希。</p>
-          <label class="field"><span>导出文件名（可改）</span>
-            <input v-model="metaExportName" type="text" placeholder="DataVault-meta-E-YYYYMMDDHHmmss.zip" title="预填默认名，可在导出前修改" @focus="!metaExportName && refreshMetaExportName()" />
-          </label>
-          <label class="field"><span>导出目录</span>
-            <input v-model="metaExportDir" type="text" placeholder="例如 D:\Backups\" title="zip 保存目录；与源受控盘可不同" />
-          </label>
-          <div class="row">
-            <button class="btn primary" title="将当前受控盘 .datavault 导出为 zip" :disabled="!canExportMeta || metaBusy || busy" @click="doExportMeta">导出元数据</button>
-            <button class="btn small" type="button" title="刷新默认文件名" :disabled="!canExportMeta || metaBusy" @click="refreshMetaExportName">刷新默认名</button>
-          </div>
-          <label class="field" style="margin-top:8px"><span>恢复 / 校验用 zip 路径</span>
-            <input v-model="metaZipPath" type="text" placeholder="例如 D:\Backups\DataVault-meta-E-….zip" title="本地 zip 完整路径" />
-          </label>
-          <div class="row">
-            <button class="btn" title="仅校验 zip + manifest，不写盘" :disabled="metaBusy || busy" @click="doVerifyMetaZip">校验元数据备份</button>
-            <button class="btn primary-outline" title="校验后恢复到当前/勾选盘符根；已有 .datavault 会先备份" :disabled="!canRestoreMeta || metaBusy || busy" @click="doRestoreMeta">恢复元数据</button>
-          </div>
-          <p v-if="metaVerifySummary" class="muted small" style="white-space:pre-wrap;margin-top:6px">{{ metaVerifySummary }}</p>
+          <p class="muted small">导出/校验/恢复盘根 .datavault 为 zip；在独立窗口中先选盘符，再用系统另存为/打开文件对话框。</p>
         </section>
+
 
       </aside>
     </div>

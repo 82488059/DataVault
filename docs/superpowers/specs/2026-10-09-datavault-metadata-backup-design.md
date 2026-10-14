@@ -2,7 +2,7 @@
 
 > 状态：**已实现**（阶段 13）  
 > 日期：2026-10-09  
-> 范围：设计 + Rust 命令 / 主窗口 Vue UI  
+> 范围：设计 + Rust 命令 / 独立窗 `meta-backup`（主窗仅入口；另存为/打开文件对话框）  
 > 相关：[备份盘受控文件设计](./2026-09-28-backup-disk-controlled-files-design.md)、盘根 `.datavault/`（`disk.json`、`vault.db`、批次元数据 JSON）
 
 ## 1. 背景

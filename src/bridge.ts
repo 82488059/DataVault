@@ -37,3 +37,7 @@ export async function openAdvancedVerifyWindow(): Promise<void> {
 export async function openAdvancedBackupWindow(): Promise<void> {
   await openOrFocusWindow("adv-backup", "数据管理 · 高级备份", 1100, 720);
 }
+
+export async function openMetaBackupWindow(): Promise<void> {
+  await openOrFocusWindow("meta-backup", "数据管理 · 元数据备份", 720, 640);
+}
