@@ -721,7 +721,6 @@ onUnmounted(() => { for (const u of unlisteners) u(); unlisteners = []; });
           <button class="btn small" title="清空勾选" @click="clearSelection">清空选择</button>
           <button class="btn small primary-outline" title="将勾选设为备份源" @click="useSelectedAsSources">设为备份源</button>
           <button class="btn small primary-outline" title="将勾选的唯一目录或当前目录设为目标" @click="useCurrentAsDest">设为目标目录</button>
-          <button class="btn small primary-outline" title="仅可标记盘符根为受控（需二次确认）" :disabled="busy" @click="doMarkBackupDisk">标记为受控</button>
           <span class="muted">已选 {{ selected.size }} 项</span>
         </div>
         <div class="pathbar" title="点击复制路径">
@@ -811,10 +810,13 @@ onUnmounted(() => { for (const u of unlisteners) u(); unlisteners = []; });
             <h2>备份索引</h2>
           </div>
           <p class="muted small" title="勾选文件或目录后，索引所选项，并将所选盘标记为受控；已在 vault.db 中的跳过，不重算哈希。">勾选文件/目录后索引所选项，并将所选盘标记为受控；已在 vault.db 中的跳过，不重算哈希。</p>
-          <button class="btn primary-outline" title="勾选文件/目录→索引所选并标记该盘为受控；已在 vault.db 中的跳过，不重算哈希"
-            :disabled="!canIndex" @click="doIndex">建立备份索引</button>
+          <div class="row">
+            <button class="btn primary-outline" title="仅可标记盘符根为受控（需二次确认）" :disabled="busy" @click="doMarkBackupDisk">标记为受控</button>
+            <button class="btn primary-outline" title="勾选文件/目录→索引所选并标记该盘为受控；已在 vault.db 中的跳过，不重算哈希"
+              :disabled="!canIndex" @click="doIndex">建立备份索引</button>
+          </div>
         </section>
-      
+
 
         <section class="panel">
           <div class="panel-head">
