@@ -795,7 +795,7 @@ onUnmounted(() => { for (const u of unlisteners) u(); unlisteners = []; });
               <button class="btn tiny" title="移除" @click="removeSource(s)">×</button></li>
             <li v-if="!sources.length" class="muted">可勾选后「设为备份源」，或直接勾选后开始备份</li>
           </ul>
-          <label class="field"><span>批次名称（可选，默认年月日时分秒）</span>
+          <label class="field"><span>批次名称（可选）</span>
             <input v-model="batchName" type="text" placeholder="例如 项目A-全量" title="留空则使用本地时间 YYYYMMDDHHmmss 作为批次号" />
           </label>
           <label class="field"><span>目标目录</span>
@@ -808,6 +808,7 @@ onUnmounted(() => { for (const u of unlisteners) u(); unlisteners = []; });
         <section class="panel">
           <div class="panel-head">
             <h2>备份索引</h2>
+            <button type="button" class="btn small primary-outline panel-head-action" title="打开独立窗口：先选盘符，再导出/校验/恢复 .datavault（另存为 / 打开文件）" @click="openMetaBackup">元数据备份…</button>
           </div>
           <p class="muted small" title="勾选文件或目录后，索引所选项，并将所选盘标记为受控；已在 vault.db 中的跳过，不重算哈希。">勾选文件/目录后索引所选项，并将所选盘标记为受控；已在 vault.db 中的跳过，不重算哈希。</p>
           <div class="row">
@@ -816,17 +817,6 @@ onUnmounted(() => { for (const u of unlisteners) u(); unlisteners = []; });
               :disabled="!canIndex" @click="doIndex">建立备份索引</button>
           </div>
         </section>
-
-
-        <section class="panel">
-          <div class="panel-head">
-            <h2>元数据备份</h2>
-            <button type="button" class="btn small primary-outline panel-head-action" title="打开独立窗口：先选盘符，再导出/校验/恢复 .datavault（另存为 / 打开文件）" @click="openMetaBackup">打开窗口</button>
-          </div>
-          <p class="muted small">导出/校验/恢复盘根 .datavault 为 zip；在独立窗口中先选盘符，再用系统另存为/打开文件对话框。</p>
-        </section>
-
-
       </aside>
     </div>
 

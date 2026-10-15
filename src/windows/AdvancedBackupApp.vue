@@ -408,7 +408,7 @@ onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } })
       <div v-if="progress.rel_path || progress.message" class="progress-file">{{ progress.rel_path || progress.message }}</div>
     </div>
 
-        <label class="field batch-name"><span>批次名称（可选；默认本地时间戳）</span>
+        <label class="field batch-name"><span>批次名称（可选）</span>
       <input v-model="batchName" type="text" placeholder="例如 项目A-全量" title="留空则使用本地时间 YYYYMMDDHHmmss 作为批次号" />
     </label>
     <div class="adv-opts">
