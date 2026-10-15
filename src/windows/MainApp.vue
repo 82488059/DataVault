@@ -355,7 +355,7 @@ async function refreshBackupDrives() {
 async function refreshBatches() {
   try {
     batchIds.value = await invoke<string[]>("list_batches");
-    if (!verifyBatchId.value && batchIds.value.length) verifyBatchId.value = batchIds.value[0];
+    // Do not auto-select first batch (would show timestamp id as a default).
     if (verifyBatchId.value) batchFilter.value = verifyBatchId.value;
   } catch { batchIds.value = []; }
 }
@@ -771,7 +771,7 @@ onUnmounted(() => { for (const u of unlisteners) u(); unlisteners = []; });
           </div>
           <label class="field" style="margin-top:10px"><span>备份批次</span>
             <div class="batch-combo" @focusout="onBatchComboBlur">
-              <input type="text" class="batch-combo-input" v-model="batchFilter" :placeholder="verifyBatchId || '请选择或输入过滤'" title="输入关键词过滤批次列表，点选一项" autocomplete="off" @focus="batchComboOpen = true" @input="batchComboOpen = true" @keydown.down.prevent="batchComboOpen = true" />
+              <input type="text" class="batch-combo-input" v-model="batchFilter" placeholder="" title="输入关键词过滤批次列表，点选一项" autocomplete="off" @focus="batchComboOpen = true" @input="batchComboOpen = true" @keydown.down.prevent="batchComboOpen = true" />
               <ul v-if="batchComboOpen" class="batch-combo-list">
                 <li v-if="!filteredBatchIds.length" class="muted">无匹配批次</li>
                 <li v-for="id in filteredBatchIds" :key="id" :class="{ active: id === verifyBatchId }" @mousedown.prevent="pickBatch(id)">{{ id }}</li>
@@ -796,7 +796,7 @@ onUnmounted(() => { for (const u of unlisteners) u(); unlisteners = []; });
             <li v-if="!sources.length" class="muted">可勾选后「设为备份源」，或直接勾选后开始备份</li>
           </ul>
           <label class="field"><span>批次名称（可选）</span>
-            <input v-model="batchName" type="text" placeholder="例如 项目A-全量" title="留空则使用本地时间 YYYYMMDDHHmmss 作为批次号" />
+            <input v-model="batchName" type="text" placeholder="" title="可选；留空由程序生成批次号" />
           </label>
           <label class="field"><span>目标目录</span>
             <input v-model="destPath" type="text" placeholder="例如 E:\Backup\DataVault" title="备份复制到此目录" />

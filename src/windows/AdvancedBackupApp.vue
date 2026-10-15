@@ -409,7 +409,7 @@ onUnmounted(() => { for (const u of unlisteners) try { u(); } catch { /* */ } })
     </div>
 
         <label class="field batch-name"><span>批次名称（可选）</span>
-      <input v-model="batchName" type="text" placeholder="例如 项目A-全量" title="留空则使用本地时间 YYYYMMDDHHmmss 作为批次号" />
+      <input v-model="batchName" type="text" placeholder="" title="可选；留空由程序生成批次号" />
     </label>
     <div class="adv-opts">
       <label class="field regex-field"><span>源文件名正则（可选；匹配文件名非路径）</span>
